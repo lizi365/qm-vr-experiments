@@ -6,24 +6,31 @@
 
 ## Demo 链接（部署后从手机/头显直接打开）
 
-> 部署到 Cloudflare Pages 后，把下面的占位链接换成实际分配到的 `*.pages.dev` 地址（或你绑定的自定义域名）。
+根导航页：https://qm-vr-experiments.pages.dev/ （列出下面所有demo，方便在头显浏览器里点点点跳转，不用记路径）
 
-- **Demo 0 · 链路验证**：`https://<your-project>.pages.dev/demo0/`
+- **Demo 0 · 链路验证**：https://qm-vr-experiments.pages.dev/demo0/
   验证 WebXR + Three.js + Cloudflare Pages 这条技术链路能不能跑通，一个旋转立方体，没有性能压测内容。
 
-- **Demo 1 · 粒子渲染压测**：`https://<your-project>.pages.dev/demo1/`
-  InstancedMesh 电子云，手柄扳机切换 500 → 100,000 粒子档位，测试Pico企业版的渲染性能上限。
+- **Demo 1 · 粒子渲染压测**：https://qm-vr-experiments.pages.dev/demo1/
+  InstancedMesh 电子云，手柄扳机切换 500 → 100,000 粒子档位，测试Pico企业版的渲染性能上限（GPU负载边界）。
+
+- **Demo Dart · 抓取投掷交互测试**：https://qm-vr-experiments.pages.dev/demo-dart/
+  简化版掷飞镖，测手柄抓取/投掷手感、投掷轨迹是否符合直觉、碰撞判定是否准确（交互延迟边界，跟Demo 1测的是完全不同的维度）。**注意命名**：这个demo刻意不叫"Demo 2"——Demo 2这个编号留给之后根据Demo 1的实测FPS数据决定方向的shader效果版本，避免命名混淆。
 
 ## 目录结构
 
 ```
 qm-vr-experiments/
-├── README.md          ← 本文件
+├── index.html          ← 根导航页，列出所有demo链接
+├── README.md            ← 本文件
 ├── demo0/
 │   ├── index.html      ← 链路验证：WebXR旋转立方体
 │   └── README.md
-└── demo1/
-    ├── index.html      ← 粒子渲染压测：InstancedMesh电子云
+├── demo1/
+│   ├── index.html      ← 粒子渲染压测：InstancedMesh电子云
+│   └── README.md
+└── demo-dart/
+    ├── index.html      ← 抓取投掷交互测试：简化版掷飞镖
     └── README.md
 ```
 
@@ -38,7 +45,7 @@ qm-vr-experiments/
    - **构建命令**：留空（纯静态文件，不需要构建）
    - **构建输出目录**：`/`（仓库根目录，因为 demo0/demo1 都是子路径，不是需要单独打包的产物）
 4. 点击部署。部署完成后会分配一个 `https://<project-name>.pages.dev` 域名。
-5. 用 Pico 企业版头显浏览器打开 `https://<project-name>.pages.dev/demo0/` 先做链路验证，确认能进VR、画面稳定后，再打开 `/demo1/` 做粒子压测。
+5. 用 Pico 企业版头显浏览器打开根导航页，先点进 Demo 0 做链路验证，确认能进VR、画面稳定后，再依次测 Demo 1（粒子压测）和 Demo Dart（交互测试）。
 6. 之后每次 `git push` 到 `main` 分支，Cloudflare Pages 会自动重新部署——不需要手动操作。
 
 ## 测试与Demo 2的关系

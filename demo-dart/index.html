@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quantum VR — Demo Dart · 抓取投掷交互测试</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #05070c; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #info {
+    position: fixed; top: 16px; left: 16px;
+    color: #cfe8ff; font-size: 13px; line-height: 1.7;
+    opacity: 0.9; z-index: 10; pointer-events: none;
+    max-width: 340px;
+  }
+  #info b { color: #7fd4ff; }
+  #info .warn { color: #ffb37f; }
+  #stats {
+    position: fixed; top: 16px; right: 16px;
+    color: #7fd4ff; font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    z-index: 10; text-align: right; line-height: 1.7;
+  }
+  #stats .warn { color: #ff9f7f; }
+  button { z-index: 20; }
+</style>
+</head>
+<body>
+
+<div id="info">
+  <b>Demo Dart · 抓取投掷交互测试</b><br/>
+  VR模式：按住手柄<b>抓握键(squeeze/grip)</b>抓住飞镖，甩动手柄后松开投掷<br/>
+  靶心10分，往外依次 8 / 6 / 4 / 2 分，脱靶0分<br/>
+  <span class="warn">桌面模式仅供预览，无法模拟抓取投掷手感</span>
+</div>
+<div id="stats">FPS: --</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.164.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.164.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// ---------- 基础场景 ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070c);
+scene.fog = new THREE.Fog(0x05070c, 3, 14);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+camera.position.set(0, 1.6, 2.2);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const ambient = new THREE.AmbientLight(0x445577, 0.6);
+scene.add(ambient);
+const point = new THREE.PointLight(0x7fd4ff, 2.5, 12);
+point.position.set(1, 2.5, 0);
+scene.add(point);
+
+const grid = new THREE.GridHelper(6, 24, 0x2a4a66, 0x152233);
+scene.add(grid);
+
+// ---------- 飞镖靶：Canvas贴图画同心圆环，贴在一个Plane上 ----------
+const TARGET_POS = new THREE.Vector3(0, 1.5, -2.5);
+const TARGET_RADIUS = 0.5; // 靶面半径（米），跟canvas贴图的圆环比例对应
+
+// 计分环半径比例（相对TARGET_RADIUS的分数），由内到外：10/8/6/4/2分，超出即脱靶
+const RINGS = [
+  { frac: 0.08, score: 10, color: '#e8c94a' }, // 靶心：金色
+  { frac: 0.22, score: 8,  color: '#c23b3b' }, // 红
+  { frac: 0.42, score: 6,  color: '#e8dcc0' }, // 米白
+  { frac: 0.65, score: 4,  color: '#2c5c3a' }, // 绿
+  { frac: 1.0,  score: 2,  color: '#e8dcc0' }, // 米白（最外圈）
+];
+
+function scoreForDistance(dist) {
+  const t = dist / TARGET_RADIUS;
+  for (const ring of RINGS) {
+    if (t <= ring.frac) return ring.score;
+  }
+  return 0; // 脱靶
+}
+
+const targetCanvas = document.createElement('canvas');
+targetCanvas.width = 512;
+targetCanvas.height = 512;
+const tctx = targetCanvas.getContext('2d');
+// 由外到内依次画实心圆，后画的覆盖前面的，天然形成同心环
+const cx = 256, cy = 256, pxPerMeter = 256 / TARGET_RADIUS;
+for (let i = RINGS.length - 1; i >= 0; i--) {
+  tctx.beginPath();
+  tctx.arc(cx, cy, RINGS[i].frac * TARGET_RADIUS * pxPerMeter, 0, Math.PI * 2);
+  tctx.fillStyle = RINGS[i].color;
+  tctx.fill();
+}
+// 环之间加一圈细描边，方便视觉分辨
+tctx.strokeStyle = 'rgba(0,0,0,0.35)';
+tctx.lineWidth = 2;
+for (const ring of RINGS) {
+  tctx.beginPath();
+  tctx.arc(cx, cy, ring.frac * TARGET_RADIUS * pxPerMeter, 0, Math.PI * 2);
+  tctx.stroke();
+}
+const targetTexture = new THREE.CanvasTexture(targetCanvas);
+
+const targetMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(TARGET_RADIUS * 2, TARGET_RADIUS * 2),
+  new THREE.MeshBasicMaterial({ map: targetTexture, side: THREE.FrontSide })
+);
+targetMesh.position.copy(TARGET_POS);
+scene.add(targetMesh);
+// 靶后面加一块深色背板，纯粹是为了避免穿模时露出场景背景，增加实体感
+const backboard = new THREE.Mesh(
+  new THREE.CircleGeometry(TARGET_RADIUS * 1.08, 32),
+  new THREE.MeshBasicMaterial({ color: 0x1a1410 })
+);
+backboard.position.copy(TARGET_POS).add(new THREE.Vector3(0, 0, -0.02));
+scene.add(backboard);
+
+// ---------- 飞镖模型：圆锥(镖尖) + 圆柱(镖身)，本地-Z方向为"前进方向" ----------
+function buildDart() {
+  const group = new THREE.Group();
+
+  const tipGeo = new THREE.ConeGeometry(0.012, 0.05, 8);
+  tipGeo.rotateX(-Math.PI / 2); // 让圆锥尖端指向本地 -Z（默认指向+Y）
+  const tipMat = new THREE.MeshStandardMaterial({ color: 0xd8d8e0, metalness: 0.7, roughness: 0.3 });
+  const tip = new THREE.Mesh(tipGeo, tipMat);
+  tip.position.z = -0.025;
+  group.add(tip);
+
+  const shaftGeo = new THREE.CylinderGeometry(0.009, 0.009, 0.09, 8);
+  shaftGeo.rotateX(-Math.PI / 2);
+  const shaftMat = new THREE.MeshStandardMaterial({
+    color: 0xff6b4a, metalness: 0.2, roughness: 0.5,
+    emissive: 0x4a1c0a, emissiveIntensity: 0.3,
+  });
+  const shaft = new THREE.Mesh(shaftGeo, shaftMat);
+  shaft.position.z = 0.045;
+  group.add(shaft);
+
+  return group;
+}
+
+const dart = buildDart();
+scene.add(dart);
+
+// ---------- 抓取/投掷状态机 ----------
+// 状态：'idle'（悬浮跟随手柄，轻微浮动动画，未锁定）
+//      'held'（扳机按住，刚性跟随手柄，记录位置历史）
+//      'flying'（已投掷，velocity+gravity逐帧积分）
+const STATE = { IDLE: 'idle', HELD: 'held', FLYING: 'flying' };
+let dartState = STATE.IDLE;
+
+let holsterController = null; // 当前"挂着"飞镖的手柄，默认第一个可用的
+let holderController = null;  // held状态下正在抓着飞镖的手柄
+
+const HOLSTER_OFFSET = new THREE.Vector3(0.03, -0.02, -0.08); // 飞镖相对手柄的悬浮偏移
+const HISTORY_LEN = 8; // 滑动窗口帧数，用于释放瞬间的速度计算
+let posHistory = []; // { p: Vector3, t: number(ms) }
+
+const dartVelocity = new THREE.Vector3();
+const GRAVITY = 9.8; // m/s^2，跟真实世界一致，不做人为放大/缩小
+let flightTime = 0;
+const MAX_FLIGHT_TIME = 4; // 秒，超时兜底判脱靶，避免飞镖飞出天际卡住状态机
+
+let totalScore = 0;
+let throwCount = 0;
+let lastScore = 0;
+let lastThrowSpeed = 0;
+
+function resetDartToHolster(controller) {
+  holsterController = controller;
+  dartState = STATE.IDLE;
+  dartVelocity.set(0, 0, 0);
+  posHistory = [];
+}
+
+function attachControllerEvents(controller) {
+  controller.addEventListener('squeezestart', () => {
+    // 只有靶飞镖当前挂在这只手（或者飞镖正闲置未指定手）时，这只手才能抓取，
+    // 避免两只手同时抓到同一支飞镖导致状态冲突
+    if (dartState !== STATE.IDLE) return;
+    if (holsterController && holsterController !== controller) return;
+
+    dartState = STATE.HELD;
+    holderController = controller;
+    posHistory = [];
+  });
+
+  controller.addEventListener('squeezeend', () => {
+    if (dartState !== STATE.HELD || holderController !== controller) return;
+
+    // ---- 用滑动窗口两端的位置差 / 时间差，算释放瞬间的平均速度矢量 ----
+    // 不用最后一帧的瞬时位移，是因为单帧抖动很容易让方向算错，窗口平均更稳。
+    if (posHistory.length >= 2) {
+      const first = posHistory[0];
+      const last = posHistory[posHistory.length - 1];
+      const dt = (last.t - first.t) / 1000;
+      if (dt > 0.001) {
+        dartVelocity.copy(last.p).sub(first.p).divideScalar(dt);
+      } else {
+        dartVelocity.set(0, 0, 0);
+      }
+    } else {
+      dartVelocity.set(0, 0, 0); // 抓起来不到2帧就松手，视为没有有效投掷动作
+    }
+
+    lastThrowSpeed = dartVelocity.length();
+    dartState = STATE.FLYING;
+    flightTime = 0;
+    holderController = null;
+  });
+
+  scene.add(controller);
+}
+
+const controller0 = renderer.xr.getController(0);
+const controller1 = renderer.xr.getController(1);
+attachControllerEvents(controller0);
+attachControllerEvents(controller1);
+
+const tmpControllerPos = new THREE.Vector3();
+const tmpControllerQuat = new THREE.Quaternion();
+const tmpOffset = new THREE.Vector3();
+
+// ---------- 悬浮记分面板（跟Demo 1同样的视觉方案：深色圆角背景 + 青色文字） ----------
+const panelCanvas = document.createElement('canvas');
+panelCanvas.width = 512;
+panelCanvas.height = 260;
+const panelCtx = panelCanvas.getContext('2d');
+const panelTexture = new THREE.CanvasTexture(panelCanvas);
+const panelMat = new THREE.MeshBasicMaterial({
+  map: panelTexture, transparent: true, depthTest: false,
+});
+const panelGeo = new THREE.PlaneGeometry(0.55, 0.28);
+const panel = new THREE.Mesh(panelGeo, panelMat);
+panel.position.set(0, 2.35, -2.5);
+panel.renderOrder = 999;
+scene.add(panel);
+
+function drawPanel(fps) {
+  const ctx = panelCtx;
+  ctx.clearRect(0, 0, 512, 260);
+  ctx.fillStyle = 'rgba(5, 10, 20, 0.75)';
+  ctx.roundRect(0, 0, 512, 260, 16);
+  ctx.fill();
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#7fd4ff';
+  ctx.font = 'bold 34px sans-serif';
+  ctx.fillText(`本次得分: ${lastScore}`, 256, 56);
+
+  ctx.font = 'bold 30px sans-serif';
+  ctx.fillStyle = '#cfe8ff';
+  ctx.fillText(`累计得分: ${totalScore}   已投掷: ${throwCount}`, 256, 100);
+
+  ctx.font = '26px sans-serif';
+  ctx.fillStyle = '#9db4cc';
+  ctx.fillText(`上次初速度: ${lastThrowSpeed.toFixed(2)} m/s`, 256, 148);
+
+  ctx.font = 'bold 32px sans-serif';
+  ctx.fillStyle = fps >= 80 ? '#7fffb0' : fps >= 60 ? '#ffe27f' : '#ff9f7f';
+  ctx.fillText(`FPS: ${fps}`, 256, 200);
+
+  const stateLabel = { idle: '待抓取', held: '抓取中…', flying: '飞行中…' }[dartState];
+  ctx.font = '22px sans-serif';
+  ctx.fillStyle = '#6a8aa8';
+  ctx.fillText(stateLabel, 256, 238);
+
+  panelTexture.needsUpdate = true;
+}
+
+// ---------- 命中判定：飞镖飞行过程中，每帧检测是否穿过靶所在的平面 ----------
+function resolveThrow(scoreValue) {
+  lastScore = scoreValue;
+  totalScore += scoreValue;
+  throwCount += 1;
+  // 飞镖回到默认挂载手（优先回到上一次投掷的那只手，没有就随便挑一个已连接的手柄）
+  resetDartToHolster(holsterController || controller0);
+}
+
+const prevDartPos = new THREE.Vector3();
+const newDartPos = new THREE.Vector3();
+
+function updateFlying(dt) {
+  prevDartPos.copy(dart.position);
+
+  dartVelocity.y -= GRAVITY * dt;
+  newDartPos.copy(dart.position).addScaledVector(dartVelocity, dt);
+  dart.position.copy(newDartPos);
+
+  // 飞镖朝向速度方向（镖尖冲前），只在速度足够大时更新朝向，避免速度接近0时orientation抖动
+  if (dartVelocity.lengthSq() > 0.0001) {
+    const lookTarget = newDartPos.clone().add(dartVelocity.clone().normalize());
+    dart.lookAt(lookTarget);
+  }
+
+  flightTime += dt;
+
+  // ---- 判断这一帧是否穿过靶平面（TARGET_POS.z），用线性插值找穿越瞬间的精确落点 ----
+  const crossedPlane =
+    (prevDartPos.z > TARGET_POS.z && newDartPos.z <= TARGET_POS.z) ||
+    (prevDartPos.z < TARGET_POS.z && newDartPos.z >= TARGET_POS.z);
+
+  if (crossedPlane) {
+    const denom = (newDartPos.z - prevDartPos.z) || 1e-6;
+    const t = (TARGET_POS.z - prevDartPos.z) / denom; // 0~1之间，穿越发生在这一帧内的比例位置
+    const hitX = prevDartPos.x + (newDartPos.x - prevDartPos.x) * t;
+    const hitY = prevDartPos.y + (newDartPos.y - prevDartPos.y) * t;
+    const dist = Math.hypot(hitX - TARGET_POS.x, hitY - TARGET_POS.y);
+    resolveThrow(scoreForDistance(dist));
+    return;
+  }
+
+  // ---- 兜底：落地或超时都算脱靶，避免飞镖飞出视野后状态机卡死 ----
+  if (dart.position.y <= 0 || flightTime > MAX_FLIGHT_TIME) {
+    resolveThrow(0);
+  }
+}
+
+// ---------- 窗口自适应 ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- FPS统计 + 主渲染循环 ----------
+let frameCount = 0;
+let lastTime = performance.now();
+let lastFrameTime = performance.now();
+let currentFps = 0;
+const statsEl = document.getElementById('stats');
+let idleBob = 0;
+
+function animate() {
+  const now = performance.now();
+  const dt = Math.min((now - lastFrameTime) / 1000, 0.05); // clamp，避免掉帧瞬间dt过大导致物理积分跳变
+  lastFrameTime = now;
+
+  const inXR = renderer.xr.isPresenting;
+
+  if (!inXR) {
+    // ---- 桌面模式：没有手柄，只做静止预览，不模拟抓取投掷 ----
+    dart.position.set(0.3, 1.3, -0.3);
+    dart.rotation.set(0, Math.PI * 0.15, 0);
+  } else if (dartState === STATE.FLYING) {
+    updateFlying(dt);
+  } else {
+    // idle 或 held：飞镖跟随手柄（held是刚性跟随，idle是带一点漂浮感的跟随）
+    const controller = dartState === STATE.HELD ? holderController : holsterController;
+    if (controller) {
+      controller.getWorldPosition(tmpControllerPos);
+      controller.getWorldQuaternion(tmpControllerQuat);
+      tmpOffset.copy(HOLSTER_OFFSET).applyQuaternion(tmpControllerQuat);
+
+      if (dartState === STATE.IDLE) {
+        idleBob += dt * 2.2;
+        tmpOffset.y += Math.sin(idleBob) * 0.008; // 轻微上下浮动，暗示"还没抓稳"
+      }
+
+      dart.position.copy(tmpControllerPos).add(tmpOffset);
+      dart.quaternion.copy(tmpControllerQuat);
+
+      if (dartState === STATE.HELD) {
+        posHistory.push({ p: dart.position.clone(), t: now });
+        if (posHistory.length > HISTORY_LEN) posHistory.shift();
+      }
+    } else if (!holsterController) {
+      // 还没有任何手柄连接过（比如XR会话刚开始的第一帧），先挂在controller0上
+      resetDartToHolster(controller0);
+    }
+  }
+
+  // 面板始终朝向摄像机（billboard）
+  panel.quaternion.copy(camera.quaternion);
+
+  renderer.render(scene, camera);
+
+  frameCount++;
+  if (now - lastTime >= 500) {
+    currentFps = Math.round((frameCount * 1000) / (now - lastTime));
+    frameCount = 0;
+    lastTime = now;
+
+    statsEl.innerHTML = `FPS: ${currentFps}<br/>累计得分: ${totalScore} · 已投掷: ${throwCount}` +
+      (currentFps < 60 ? '<br/><span class="warn">⚠ 低于60fps</span>' : '');
+    drawPanel(currentFps);
+  }
+}
+
+renderer.setAnimationLoop(animate);
+</script>
+</body>
+</html>
