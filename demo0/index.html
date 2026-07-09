@@ -72,13 +72,15 @@ scene.add(point);
 
 // ---------- 唯一的测试对象：一个旋转立方体 ----------
 // Single rotating cube — the only thing this demo needs to prove the pipeline works.
-const cubeGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+// 几何体/材质/位置跟Demo 1里内嵌的基线立方体完全一致，这样两个demo之间
+// 唯一的变量就是"有没有粒子"，做性能对比才有意义，不重新设计这部分。
+const cubeGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
 const cubeMat = new THREE.MeshStandardMaterial({
   color: 0x7fd4ff, metalness: 0.3, roughness: 0.4,
   emissive: 0x0a3a55, emissiveIntensity: 0.4,
 });
 const cube = new THREE.Mesh(cubeGeo, cubeMat);
-cube.position.set(0, 1.5, -1.5);
+cube.position.set(-0.8, 1.9, -1.2);
 scene.add(cube);
 
 // ---------- 地面网格（帮助判断VR里的空间感/追踪是否正常） ----------
