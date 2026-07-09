@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quantum VR — Demo 0 · 链路验证</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #05070c; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #info {
+    position: fixed; top: 16px; left: 16px;
+    color: #cfe8ff; font-size: 13px; line-height: 1.7;
+    opacity: 0.9; z-index: 10; pointer-events: none;
+    max-width: 320px;
+  }
+  #info b { color: #7fd4ff; }
+  #stats {
+    position: fixed; top: 16px; right: 16px;
+    color: #7fd4ff; font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    z-index: 10; text-align: right; line-height: 1.7;
+  }
+  #stats .warn { color: #ff9f7f; }
+  button { z-index: 20; }
+</style>
+</head>
+<body>
+
+<div id="info">
+  <b>Demo 0 · 链路验证</b><br/>
+  目的：确认 WebXR + Three.js + Cloudflare Pages 这条技术链路能跑通<br/>
+  没有性能压测内容，只有一个持续旋转的立方体
+</div>
+<div id="stats">FPS: --</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.164.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.164.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// ---------- 基础场景 ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070c);
+scene.fog = new THREE.Fog(0x05070c, 3, 14);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+camera.position.set(0, 1.6, 2.2);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const ambient = new THREE.AmbientLight(0x445577, 0.6);
+scene.add(ambient);
+const point = new THREE.PointLight(0x7fd4ff, 2.5, 12);
+point.position.set(1, 2.5, 0);
+scene.add(point);
+
+// ---------- 唯一的测试对象：一个旋转立方体 ----------
+// Single rotating cube — the only thing this demo needs to prove the pipeline works.
+const cubeGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+const cubeMat = new THREE.MeshStandardMaterial({
+  color: 0x7fd4ff, metalness: 0.3, roughness: 0.4,
+  emissive: 0x0a3a55, emissiveIntensity: 0.4,
+});
+const cube = new THREE.Mesh(cubeGeo, cubeMat);
+cube.position.set(0, 1.5, -1.5);
+scene.add(cube);
+
+// ---------- 地面网格（帮助判断VR里的空间感/追踪是否正常） ----------
+const grid = new THREE.GridHelper(6, 24, 0x2a4a66, 0x152233);
+scene.add(grid);
+
+// ---------- 悬浮文字面板（canvas贴图，VR内可读，不依赖DOM） ----------
+const panelCanvas = document.createElement('canvas');
+panelCanvas.width = 512;
+panelCanvas.height = 192;
+const panelCtx = panelCanvas.getContext('2d');
+const panelTexture = new THREE.CanvasTexture(panelCanvas);
+const panelMat = new THREE.MeshBasicMaterial({
+  map: panelTexture, transparent: true, depthTest: false,
+});
+const panelGeo = new THREE.PlaneGeometry(0.5, 0.19);
+const panel = new THREE.Mesh(panelGeo, panelMat);
+panel.position.set(0, 2.15, -1.5);
+panel.renderOrder = 999;
+scene.add(panel);
+
+function drawPanel(fps) {
+  const ctx = panelCtx;
+  ctx.clearRect(0, 0, 512, 192);
+  ctx.fillStyle = 'rgba(5, 10, 20, 0.75)';
+  ctx.roundRect(0, 0, 512, 192, 16);
+  ctx.fill();
+
+  ctx.fillStyle = '#7fd4ff';
+  ctx.font = 'bold 36px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('链路验证 Demo 0', 256, 76);
+
+  ctx.font = 'bold 48px sans-serif';
+  ctx.fillStyle = fps >= 80 ? '#7fffb0' : fps >= 60 ? '#ffe27f' : '#ff9f7f';
+  ctx.fillText(`FPS: ${fps}`, 256, 140);
+
+  panelTexture.needsUpdate = true;
+}
+
+// ---------- 窗口自适应 ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- FPS统计 + 渲染循环 ----------
+let frameCount = 0;
+let lastTime = performance.now();
+let currentFps = 0;
+const statsEl = document.getElementById('stats');
+
+function animate() {
+  cube.rotation.x += 0.01;
+  cube.rotation.y += 0.015;
+
+  // 面板始终朝向摄像机（billboard），VR和桌面模式都适用
+  panel.quaternion.copy(camera.quaternion);
+
+  renderer.render(scene, camera);
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastTime >= 500) {
+    currentFps = Math.round((frameCount * 1000) / (now - lastTime));
+    frameCount = 0;
+    lastTime = now;
+
+    statsEl.innerHTML = `FPS: ${currentFps}` +
+      (currentFps < 60 ? '<br/><span class="warn">⚠ 低于60fps</span>' : '');
+    drawPanel(currentFps);
+  }
+}
+
+renderer.setAnimationLoop(animate);
+</script>
+</body>
+</html>

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quantum VR — Demo 1 · 粒子压测</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #05070c; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #info {
+    position: fixed; top: 16px; left: 16px;
+    color: #cfe8ff; font-size: 13px; line-height: 1.7;
+    opacity: 0.9; z-index: 10; pointer-events: none;
+    max-width: 320px;
+  }
+  #info b { color: #7fd4ff; }
+  #stats {
+    position: fixed; top: 16px; right: 16px;
+    color: #7fd4ff; font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    z-index: 10; text-align: right; line-height: 1.7;
+  }
+  #stats .warn { color: #ff9f7f; }
+  button { z-index: 20; }
+</style>
+</head>
+<body>
+
+<div id="info">
+  <b>Demo 1 · 粒子渲染压测</b><br/>
+  桌面模式：按数字键 <b>1-6</b> 切换粒子档位<br/>
+  VR模式：按手柄 <b>扳机键(select)</b> 切换档位<br/>
+  档位：500 → 2K → 8K → 20K → 50K → 100K
+</div>
+<div id="stats">FPS: --<br/>粒子数: --</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.164.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.164.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// ---------- 基础场景 ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070c);
+scene.fog = new THREE.Fog(0x05070c, 3, 14);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+camera.position.set(0, 1.6, 2.2);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const ambient = new THREE.AmbientLight(0x445577, 0.6);
+scene.add(ambient);
+const point = new THREE.PointLight(0x7fd4ff, 2.5, 12);
+point.position.set(1, 2.5, 0);
+scene.add(point);
+
+// ---------- 基线参照物：Demo 0 的立方体，挪到侧边角落 ----------
+const cubeGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+const cubeMat = new THREE.MeshStandardMaterial({
+  color: 0x7fd4ff, metalness: 0.3, roughness: 0.4,
+  emissive: 0x0a3a55, emissiveIntensity: 0.4,
+});
+const cube = new THREE.Mesh(cubeGeo, cubeMat);
+cube.position.set(-0.8, 1.9, -1.2);
+scene.add(cube);
+
+// ---------- 地面网格 ----------
+const grid = new THREE.GridHelper(6, 24, 0x2a4a66, 0x152233);
+scene.add(grid);
+
+// ---------- 电子云粒子系统（InstancedMesh） ----------
+// 用斐波那契球面分布，模拟电子云的球状概率密度，而不是均匀随机点
+// （均匀随机点会在球心附近扎堆，斐波那契分布视觉上更接近"电子云"的direct
+const CLOUD_CENTER = new THREE.Vector3(0, 1.4, -1.5);
+const CLOUD_RADIUS = 0.6;
+
+const particleGeo = new THREE.SphereGeometry(0.01, 6, 6); // 每个粒子是极简小球，省顶点开销
+const particleMat = new THREE.MeshBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.75,
+});
+
+const LEVELS = [500, 2000, 8000, 20000, 50000, 100000];
+let currentLevelIndex = 0;
+let instancedCloud = null;
+
+const dummy = new THREE.Object3D();
+const color = new THREE.Color();
+
+function buildCloud(count) {
+  // 销毁旧的，释放显存
+  if (instancedCloud) {
+    scene.remove(instancedCloud);
+    instancedCloud.geometry.dispose();
+    instancedCloud.material.dispose();
+  }
+
+  const mesh = new THREE.InstancedMesh(particleGeo, particleMat, count);
+  const golden = Math.PI * (3 - Math.sqrt(5)); // 黄金角
+
+  for (let i = 0; i < count; i++) {
+    // 斐波那契球面算法：均匀分布在球壳上
+    const t = i / count;
+    const yOnSphere = 1 - 2 * t;
+    const radiusAtY = Math.sqrt(1 - yOnSphere * yOnSphere);
+    const theta = golden * i;
+
+    // 加一层径向抖动，模拟"云雾感"而非硬边球壳
+    const jitter = 0.55 + Math.random() * 0.45;
+    const r = CLOUD_RADIUS * jitter;
+
+    const x = Math.cos(theta) * radiusAtY * r;
+    const y = yOnSphere * r;
+    const z = Math.sin(theta) * radiusAtY * r;
+
+    dummy.position.set(
+      CLOUD_CENTER.x + x,
+      CLOUD_CENTER.y + y,
+      CLOUD_CENTER.z + z
+    );
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+
+    // 颜色按到球心距离映射，模拟"能量"渐变（内蓝外白，类似真实电子云可视化配色）
+    const energyT = jitter;
+    color.setHSL(0.56 - energyT * 0.15, 0.9, 0.45 + energyT * 0.35);
+    mesh.setColorAt(i, color);
+  }
+
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+  scene.add(mesh);
+  instancedCloud = mesh;
+  return mesh;
+}
+
+buildCloud(LEVELS[currentLevelIndex]);
+
+// ---------- 悬浮文字面板（canvas贴图，VR内可读，不依赖DOM） ----------
+const panelCanvas = document.createElement('canvas');
+panelCanvas.width = 512;
+panelCanvas.height = 192;
+const panelCtx = panelCanvas.getContext('2d');
+const panelTexture = new THREE.CanvasTexture(panelCanvas);
+const panelMat = new THREE.MeshBasicMaterial({
+  map: panelTexture, transparent: true, depthTest: false,
+});
+const panelGeo = new THREE.PlaneGeometry(0.5, 0.19);
+const panel = new THREE.Mesh(panelGeo, panelMat);
+panel.position.set(0, 2.15, -1.5);
+panel.renderOrder = 999;
+scene.add(panel);
+
+function drawPanel(count, fps) {
+  const ctx = panelCtx;
+  ctx.clearRect(0, 0, 512, 192);
+  ctx.fillStyle = 'rgba(5, 10, 20, 0.75)';
+  ctx.roundRect(0, 0, 512, 192, 16);
+  ctx.fill();
+
+  ctx.fillStyle = '#7fd4ff';
+  ctx.font = 'bold 40px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`粒子数: ${count.toLocaleString()}`, 256, 76);
+
+  ctx.font = 'bold 48px sans-serif';
+  ctx.fillStyle = fps >= 80 ? '#7fffb0' : fps >= 60 ? '#ffe27f' : '#ff9f7f';
+  ctx.fillText(`FPS: ${fps}`, 256, 140);
+
+  panelTexture.needsUpdate = true;
+}
+
+// ---------- 手柄扳机切换档位（VR模式） ----------
+function nextLevel() {
+  currentLevelIndex = (currentLevelIndex + 1) % LEVELS.length;
+  buildCloud(LEVELS[currentLevelIndex]);
+}
+
+const controller0 = renderer.xr.getController(0);
+const controller1 = renderer.xr.getController(1);
+controller0.addEventListener('selectstart', nextLevel);
+controller1.addEventListener('selectstart', nextLevel);
+scene.add(controller0);
+scene.add(controller1);
+
+// 手柄射线指示器，方便你知道手柄在指哪（可选，帮助判断追踪是否正常）
+const rayGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1),
+]);
+const rayMat = new THREE.LineBasicMaterial({ color: 0x7fd4ff, transparent: true, opacity: 0.4 });
+const ray0 = new THREE.Line(rayGeo, rayMat);
+const ray1 = new THREE.Line(rayGeo, rayMat);
+ray0.scale.z = 1.5; ray1.scale.z = 1.5;
+controller0.add(ray0);
+controller1.add(ray1);
+
+// ---------- 桌面模式：数字键切换档位 ----------
+window.addEventListener('keydown', (e) => {
+  const n = parseInt(e.key);
+  if (n >= 1 && n <= LEVELS.length) {
+    currentLevelIndex = n - 1;
+    buildCloud(LEVELS[currentLevelIndex]);
+  }
+});
+
+// ---------- 窗口自适应 ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- FPS统计 + 渲染循环 ----------
+let frameCount = 0;
+let lastTime = performance.now();
+let currentFps = 0;
+const statsEl = document.getElementById('stats');
+
+function animate() {
+  cube.rotation.x += 0.01;
+  cube.rotation.y += 0.015;
+
+  if (instancedCloud) {
+    instancedCloud.rotation.y += 0.0015; // 缓慢整体旋转，方便观察云的立体感
+  }
+
+  // 面板始终朝向摄像机（billboard），VR和桌面模式都适用
+  panel.quaternion.copy(camera.quaternion);
+
+  renderer.render(scene, camera);
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastTime >= 500) {
+    currentFps = Math.round((frameCount * 1000) / (now - lastTime));
+    frameCount = 0;
+    lastTime = now;
+
+    const count = LEVELS[currentLevelIndex];
+    statsEl.innerHTML = `FPS: ${currentFps}<br/>粒子数: ${count.toLocaleString()}` +
+      (currentFps < 60 ? '<br/><span class="warn">⚠ 低于60fps</span>' : '');
+    drawPanel(count, currentFps);
+  }
+}
+
+renderer.setAnimationLoop(animate);
+</script>
+</body>
+</html>
