@@ -134,6 +134,11 @@ backboard.position.copy(TARGET_POS).add(new THREE.Vector3(0, 0, -0.02));
 scene.add(backboard);
 
 // ---------- 飞镖模型：圆锥(镖尖) + 圆柱(镖身)，本地-Z方向为"前进方向" ----------
+// shaftMat拿到外层作用域，是因为下面"预抓取发光提示"需要在抓取阈值前
+// 动态调它的emissiveIntensity，做一个呼吸感的高亮。
+const BASE_SHAFT_EMISSIVE = 0.3;
+let shaftMat;
+
 function buildDart() {
   const group = new THREE.Group();
 
@@ -146,9 +151,9 @@ function buildDart() {
 
   const shaftGeo = new THREE.CylinderGeometry(0.009, 0.009, 0.09, 8);
   shaftGeo.rotateX(-Math.PI / 2);
-  const shaftMat = new THREE.MeshStandardMaterial({
+  shaftMat = new THREE.MeshStandardMaterial({
     color: 0xff6b4a, metalness: 0.2, roughness: 0.5,
-    emissive: 0x4a1c0a, emissiveIntensity: 0.3,
+    emissive: 0x4a1c0a, emissiveIntensity: BASE_SHAFT_EMISSIVE,
   });
   const shaft = new THREE.Mesh(shaftGeo, shaftMat);
   shaft.position.z = 0.045;
@@ -160,16 +165,162 @@ function buildDart() {
 const dart = buildDart();
 scene.add(dart);
 
+// ---------- 音效：Web Audio API合成，不引入外部音频文件 ----------
+// AudioContext要在用户手势之后才能真正发声（浏览器自动播放限制），这里
+// 用懒加载，第一次抓取时才真正创建/resume，不在页面加载时就建。
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  return audioCtx;
+}
+
+// 一段短促的音调，用振荡器+包络实现，type控制音色（sine柔和/triangle明亮/
+// square更"哒"一点的打击感），freqEnd可选——传了就做一个音高滑动（用在抓取
+// 音效上，做出"咔"一下降调的吸附感）。
+function playTone({ freq, duration = 0.12, type = 'sine', gain = 0.25, freqEnd = null }) {
+  const ctx = ensureAudio();
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, ctx.currentTime);
+  if (freqEnd) {
+    osc.frequency.exponentialRampToValueAtTime(freqEnd, ctx.currentTime + duration);
+  }
+  // 快速起振（8ms）避免咔哒声，然后指数衰减到接近静音，比线性衰减更接近
+  // 真实打击音的"听感"
+  g.gain.setValueAtTime(0, ctx.currentTime);
+  g.gain.linearRampToValueAtTime(gain, ctx.currentTime + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+  osc.connect(g).connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + duration + 0.02);
+}
+
+// 一段随时间衰减的带通滤波白噪声，听感类似"一阵短促的欢呼/掌声"，
+// 用在10环命中上跟主音调叠加，纯振荡器做不出这种质感，白噪声+滤波是
+// 成本最低的近似方案，不需要引入真实音频素材。
+function playNoiseBurst(duration = 0.4, gain = 0.16) {
+  const ctx = ensureAudio();
+  const bufferSize = Math.floor(ctx.sampleRate * duration);
+  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize); // 随时间线性衰减
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = 2500;
+  filter.Q.value = 0.6;
+  const g = ctx.createGain();
+  g.gain.value = gain;
+  src.connect(filter).connect(g).connect(ctx.destination);
+  src.start();
+}
+
+function playGrabSound() {
+  // 短促降调的方波"咔"声，模拟抓取吸附的手感反馈
+  playTone({ freq: 720, freqEnd: 480, duration: 0.05, type: 'square', gain: 0.18 });
+}
+
+// 环数越高音调越亮（sine→triangle音色也更清脆），最外圈是低沉闷响，
+// 10环额外叠加一段欢呼音效，呼应视觉上的"EXCELLENT!"反馈
+const HIT_SOUND_BY_SCORE = {
+  10: () => { playTone({ freq: 880, duration: 0.18, type: 'triangle', gain: 0.3 }); playNoiseBurst(0.4, 0.16); },
+  8: () => playTone({ freq: 600, duration: 0.16, type: 'triangle', gain: 0.28 }),
+  6: () => playTone({ freq: 420, duration: 0.16, type: 'sine', gain: 0.26 }),
+  4: () => playTone({ freq: 260, duration: 0.18, type: 'sine', gain: 0.24 }),
+  2: () => playTone({ freq: 160, duration: 0.22, type: 'sine', gain: 0.22 }),
+  0: () => playTone({ freq: 90, duration: 0.16, type: 'sine', gain: 0.15 }),
+};
+function playHitSound(scoreValue) {
+  (HIT_SOUND_BY_SCORE[scoreValue] || HIT_SOUND_BY_SCORE[0])();
+}
+
+// ---------- 命中评级文字：Canvas贴图 + 简单缩放动画，参考街机投掷类游戏的即时反馈 ----------
+// 只有中高分段（6/8/10）才弹字，2/4分和脱靶只有命中标记点，不额外加文字，
+// 避免每次投掷都弹一堆文字导致视觉噪音，把"炸裂反馈"留给真正打得好的时候。
+const RATING_CONFIG = {
+  10: { text: 'EXCELLENT!', color: '#ffe27f', stroke: '#7a5a00' },
+  8: { text: 'GREAT!', color: '#ffb37f', stroke: '#6a3510' },
+  6: { text: 'GOOD!', color: '#7fd4ff', stroke: '#0a3a55' },
+};
+const ratingTextures = {};
+for (const [scoreKey, cfg] of Object.entries(RATING_CONFIG)) {
+  const c = document.createElement('canvas');
+  c.width = 400;
+  c.height = 140;
+  const rctx = c.getContext('2d');
+  rctx.textAlign = 'center';
+  rctx.textBaseline = 'middle';
+  rctx.font = 'bold 64px sans-serif';
+  rctx.lineWidth = 8;
+  rctx.strokeStyle = cfg.stroke;
+  rctx.strokeText(cfg.text, 200, 70);
+  rctx.fillStyle = cfg.color;
+  rctx.fillText(cfg.text, 200, 70);
+  ratingTextures[scoreKey] = new THREE.CanvasTexture(c);
+}
+
+const RATING_LIFETIME = 1500; // ms
+const ratingTexts = []; // { mesh, createdAt, baseY }
+
+function spawnRatingText(x, y, scoreValue) {
+  const texture = ratingTextures[scoreValue];
+  if (!texture) return; // 2/4/0分不弹字
+
+  const mat = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.112), mat);
+  const baseY = y + 0.1;
+  mesh.position.set(x, baseY, TARGET_POS.z + 0.01); // 比命中标记点更靠摄像机一点，避免叠在一起z-fighting
+  mesh.renderOrder = 1000;
+  scene.add(mesh);
+  ratingTexts.push({ mesh, createdAt: performance.now(), baseY });
+}
+
+function updateRatingTexts(now) {
+  for (let i = ratingTexts.length - 1; i >= 0; i--) {
+    const r = ratingTexts[i];
+    const age = now - r.createdAt;
+    if (age > RATING_LIFETIME) {
+      scene.remove(r.mesh);
+      r.mesh.material.dispose();
+      ratingTexts.splice(i, 1);
+      continue;
+    }
+
+    // 前150ms做一个简单的"弹出感"缩放（overshoot再回落），之后保持1倍大小
+    // 缓慢上飘，最后400ms淡出——不追求精确的缓动曲线，够用就好
+    let scale;
+    if (age < 150) {
+      const t = age / 150;
+      scale = 0.3 + t * 0.85 + Math.sin(t * Math.PI) * 0.15;
+    } else {
+      scale = 1.0;
+    }
+    r.mesh.scale.set(scale, scale, 1);
+    r.mesh.position.y = r.baseY + Math.min(Math.max(age - 150, 0), 1000) / 1000 * 0.08;
+    r.mesh.material.opacity = age < 900 ? 1 : Math.max(0, 1 - (age - 900) / (RATING_LIFETIME - 900));
+    r.mesh.quaternion.copy(camera.quaternion); // 始终朝向摄像机
+  }
+}
+
 // ---------- 抓取/投掷状态机 ----------
 // 状态：'idle'（悬浮在场景固定位置，轻微浮动动画，未锁定）
-//      'held'（抓握键按住，刚性跟随抓取它的那只手，记录位置历史）
+//      'held'（抓着，刚性跟随抓取它的那只手，记录位置+朝向历史）
 //      'flying'（已投掷，velocity+gravity逐帧积分）
 //
 // 不预设左右手：飞镖闲置时停在场景里一个固定的中性位置（不挂在任何一个
-// controller index上），哪只手先按抓握键触发squeezestart就归哪只手，
-// 松开后飞镖飞出去、计分、再回到中性位置，等下一次任意一只手抓取。
-// 之前这里硬编码成"默认挂在controller0"，在Pico 4 Ultra上controller0
-// 固定对应左手，导致惯用右手的用户抓不到——这是这次要修的第一个问题。
+// controller index上），哪只手先抓就归哪只手，松开后飞镖飞出去、计分、
+// 再回到中性位置，等下一次任意一只手抓取。之前这里硬编码成"默认挂在
+// controller0"，在Pico 4 Ultra上controller0固定对应左手，导致惯用右手
+// 的用户抓不到——这是之前修的问题，这次没再动。
 const STATE = { IDLE: 'idle', HELD: 'held', FLYING: 'flying' };
 let dartState = STATE.IDLE;
 
@@ -177,8 +328,8 @@ let holderController = null;  // held/flying起点：当前（或刚才）抓着
 
 const IDLE_POS = new THREE.Vector3(0, 1.3, -0.35); // 中性待抓取位置，双手都够得着
 const GRAB_OFFSET = new THREE.Vector3(0.03, -0.02, -0.08); // 抓住后飞镖相对手柄的偏移
-const HISTORY_LEN = 8; // 滑动窗口帧数，用于释放瞬间的速度计算
-let posHistory = []; // { p: Vector3, t: number(ms) }
+const HISTORY_LEN = 5; // 滑动窗口帧数：从8帧缩短到5帧，提高对短促手腕甩动的响应
+let posHistory = []; // { p: Vector3(controller世界坐标), q: Quaternion(controller世界朝向), t: number(ms) }
 
 const dartVelocity = new THREE.Vector3();
 const GRAVITY = 9.8; // m/s^2，跟真实世界一致，不做人为放大/缩小
@@ -198,48 +349,128 @@ function resetDartToIdle() {
   posHistory = [];
 }
 
-function attachControllerEvents(controller) {
-  controller.addEventListener('squeezestart', () => {
-    // 谁先按谁抓——不检查是哪只手，只检查飞镖当前是不是闲置状态，
-    // 这样已经有一支飞镖在飞/被抓着的时候，另一只手按了也不会抢过来。
-    if (dartState !== STATE.IDLE) return;
+// ---------- 抓握输入：squeeze原生事件 + 模拟量阈值双通道 ----------
+// 之前只依赖squeezestart/squeezeend这两个二值化事件，真机反馈"按了经常没
+// 反应"——这两个事件的实际触发时机是浏览器/运行时自己决定的，不透明也不
+// 一定够灵敏。改法：如果WebXR Gamepad暴露了模拟量（button.value，0~1连续
+// 值），改成每帧轮询，用一个明显低于"按到底"的阈值触发抓取，响应更快；
+// 原生squeezestart/squeezeend继续保留作为兜底——万一某些输入源真的拿不到
+// 模拟量（inputSource.gamepad不存在），至少还有原生事件能用。
+// grabDart/releaseDart两条路径最终都收敛到同一组函数，本身是幂等的（状态
+// 不对就直接return），两条路径同时挂着不会互相打架，谁先触发算谁的。
+const GRAB_THRESHOLD = 0.6;    // 模拟量超过这个值，判定为"确实抓住了"
+const RELEASE_THRESHOLD = 0.45; // 比GRAB_THRESHOLD低一截，做个迟滞区间，避免数值在临界点抖动导致反复抓/放
+const PRE_GRAB_THRESHOLD = 0.3; // 超过这个值但还没到GRAB_THRESHOLD，触发"预抓取"发光提示
+const SQUEEZE_BUTTON_INDEX = 1; // xr-standard手柄映射的约定：0=trigger扳机，1=squeeze抓握键
 
-    dartState = STATE.HELD;
-    holderController = controller;
-    posHistory = [];
-  });
+const inputSources = [null, null]; // 对应 controller0/controller1 的 XRInputSource，从connected事件拿
 
-  controller.addEventListener('squeezeend', () => {
-    if (dartState !== STATE.HELD || holderController !== controller) return;
+function getSqueezeValue(idx) {
+  const src = inputSources[idx];
+  const gp = src && src.gamepad;
+  if (!gp) return null; // 拿不到模拟量数据，调用方要fallback到原生事件
+  const btn = gp.buttons[SQUEEZE_BUTTON_INDEX];
+  if (!btn) return null;
+  return typeof btn.value === 'number' ? btn.value : (btn.pressed ? 1 : 0);
+}
 
-    // ---- 用滑动窗口两端的位置差 / 时间差，算释放瞬间的平均速度矢量 ----
-    // 不用最后一帧的瞬时位移，是因为单帧抖动很容易让方向算错，窗口平均更稳。
-    if (posHistory.length >= 2) {
-      const first = posHistory[0];
-      const last = posHistory[posHistory.length - 1];
-      const dt = (last.t - first.t) / 1000;
-      if (dt > 0.001) {
-        dartVelocity.copy(last.p).sub(first.p).divideScalar(dt);
-      } else {
-        dartVelocity.set(0, 0, 0);
+let hintOn = false; // 预抓取发光提示是否激活，animate()里读这个来驱动呼吸动画
+
+function grabDart(controller) {
+  if (dartState !== STATE.IDLE) return;
+  dartState = STATE.HELD;
+  holderController = controller;
+  posHistory = [];
+  hintOn = false; // 已经抓稳了，取消发光提示
+  playGrabSound();
+}
+
+function releaseDart(controller) {
+  if (dartState !== STATE.HELD || holderController !== controller) return;
+
+  // ---- 速度计算：线性速度（窗口平均） + 旋转带来的切向速度 ----
+  // 手腕甩动的特征是"朝向变化快、位移距离短"，纯线性位移窗口对这种动作
+  // 天然不敏感——之前只算线性速度，会把手腕甩动的力道稀释掉。这里补上
+  // 旋转贡献：飞镖抓在手上时相对controller原点有一个偏移(GRAB_OFFSET)，
+  // controller转动时，这个偏移点会因为"杠杆效应"获得额外的切向速度，
+  // 公式是刚体运动学的 v_point = v_origin + ω × r（r是偏移向量，ω是角速度）。
+  // 大幅度手臂投掷本身转动较慢，这一项贡献很小，不会干扰原有判定；
+  // 小幅度手腕甩动转动快，这一项能补足纯线性位移算出来的"虚弱"速度。
+  if (posHistory.length >= 2) {
+    const first = posHistory[0];
+    const last = posHistory[posHistory.length - 1];
+    const dt = (last.t - first.t) / 1000;
+
+    if (dt > 0.001) {
+      const linVel = last.p.clone().sub(first.p).divideScalar(dt);
+
+      // 四元数差 → 轴角，得到这段时间的旋转轴+角速度
+      const deltaQuat = last.q.clone().multiply(first.q.clone().invert());
+      if (deltaQuat.w < 0) {
+        // q和-q表示同一个旋转，统一符号避免acos算出"绕远路"的角度
+        deltaQuat.set(-deltaQuat.x, -deltaQuat.y, -deltaQuat.z, -deltaQuat.w);
       }
+      const angle = 2 * Math.acos(THREE.MathUtils.clamp(deltaQuat.w, -1, 1));
+      const s = Math.sqrt(1 - deltaQuat.w * deltaQuat.w);
+      const axis = s < 1e-6
+        ? new THREE.Vector3(0, 0, 0)
+        : new THREE.Vector3(deltaQuat.x, deltaQuat.y, deltaQuat.z).divideScalar(s);
+      const angularVel = axis.multiplyScalar(angle / dt); // rad/s
+
+      const worldOffset = GRAB_OFFSET.clone().applyQuaternion(last.q);
+      const tangentialVel = angularVel.clone().cross(worldOffset);
+
+      dartVelocity.copy(linVel).add(tangentialVel);
     } else {
-      dartVelocity.set(0, 0, 0); // 抓起来不到2帧就松手，视为没有有效投掷动作
+      dartVelocity.set(0, 0, 0);
     }
+  } else {
+    dartVelocity.set(0, 0, 0); // 抓起来不到2帧就松手，视为没有有效投掷动作
+  }
 
-    lastThrowSpeed = dartVelocity.length();
-    dartState = STATE.FLYING;
-    flightTime = 0;
-    holderController = null;
-  });
+  lastThrowSpeed = dartVelocity.length();
+  dartState = STATE.FLYING;
+  flightTime = 0;
+  holderController = null;
+}
 
+function attachControllerEvents(controller, idx) {
+  controller.addEventListener('connected', (e) => { inputSources[idx] = e.data; });
+  controller.addEventListener('disconnected', () => { inputSources[idx] = null; });
+  // 原生事件：兜底路径，万一模拟量拿不到，至少这条还能用
+  controller.addEventListener('squeezestart', () => grabDart(controller));
+  controller.addEventListener('squeezeend', () => releaseDart(controller));
   scene.add(controller);
 }
 
 const controller0 = renderer.xr.getController(0);
 const controller1 = renderer.xr.getController(1);
-attachControllerEvents(controller0);
-attachControllerEvents(controller1);
+attachControllerEvents(controller0, 0);
+attachControllerEvents(controller1, 1);
+
+// 每帧轮询模拟量，驱动更灵敏的抓取判定 + 预抓取发光提示
+function updateAnalogGrabInput() {
+  let hint = false;
+  const controllers = [controller0, controller1];
+  for (let i = 0; i < controllers.length; i++) {
+    const controller = controllers[i];
+    const value = getSqueezeValue(i);
+    if (value === null) continue; // 这只手没有可用的模拟量，交给原生事件兜底
+
+    if (dartState === STATE.IDLE) {
+      if (value >= GRAB_THRESHOLD) {
+        grabDart(controller);
+      } else if (value >= PRE_GRAB_THRESHOLD) {
+        hint = true;
+      }
+    } else if (dartState === STATE.HELD && holderController === controller) {
+      if (value < RELEASE_THRESHOLD) {
+        releaseDart(controller);
+      }
+    }
+  }
+  if (dartState === STATE.IDLE) hintOn = hint;
+}
 
 // ---------- 场景内退出VR面板（见shared/，三个demo共用同一份逻辑） ----------
 const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
@@ -358,7 +589,9 @@ function resolveThrow(scoreValue, hitPoint) {
   lastHitDistance = hitPoint ? hitPoint.dist : null;
   if (hitPoint) {
     spawnHitMarker(hitPoint.x, hitPoint.y, colorForScore(scoreValue));
+    spawnRatingText(hitPoint.x, hitPoint.y, scoreValue);
   }
+  playHitSound(scoreValue);
   resetDartToIdle();
 }
 
@@ -424,6 +657,10 @@ function animate() {
 
   const inXR = renderer.xr.isPresenting;
 
+  if (inXR) {
+    updateAnalogGrabInput(); // 每帧轮询模拟量，比只靠原生事件更灵敏
+  }
+
   if (!inXR) {
     // ---- 桌面模式：没有手柄，只做静止预览，不模拟抓取投掷 ----
     dart.position.set(0.3, 1.3, -0.3);
@@ -439,7 +676,9 @@ function animate() {
     dart.position.copy(tmpControllerPos).add(tmpOffset);
     dart.quaternion.copy(tmpControllerQuat);
 
-    posHistory.push({ p: dart.position.clone(), t: now });
+    // 记录的是controller本身的世界坐标+朝向（不是飞镖偏移后的位置），
+    // 释放时要分别用这两组数据算线性速度和角速度，见releaseDart()
+    posHistory.push({ p: tmpControllerPos.clone(), q: tmpControllerQuat.clone(), t: now });
     if (posHistory.length > HISTORY_LEN) posHistory.shift();
   } else {
     // idle：停在场景中性位置，带一点轻微浮动，暗示"还没抓稳"，
@@ -447,9 +686,18 @@ function animate() {
     idleBob += dt * 2.2;
     dart.position.set(IDLE_POS.x, IDLE_POS.y + Math.sin(idleBob) * 0.01, IDLE_POS.z);
     dart.quaternion.identity();
+
+    // 预抓取发光提示：扳机压力过了PRE_GRAB_THRESHOLD但还没到GRAB_THRESHOLD时，
+    // 让镖身做一个呼吸感的高亮，告诉用户"已经在可抓取范围了，继续按"
+    if (hintOn) {
+      shaftMat.emissiveIntensity = 0.9 + Math.sin(now / 120) * 0.6;
+    } else {
+      shaftMat.emissiveIntensity = BASE_SHAFT_EMISSIVE;
+    }
   }
 
   updateHitMarkers(now);
+  updateRatingTexts(now);
 
   // 面板始终朝向摄像机（billboard）
   panel.quaternion.copy(camera.quaternion);
