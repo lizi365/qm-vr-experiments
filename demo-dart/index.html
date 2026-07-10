@@ -1081,6 +1081,49 @@ function updateFlash(now) {
   flashMat.opacity = opacity;
 }
 
+// ---------- 关卡切换转场："擦除"式Plane从一侧扫过整个画面 ----------
+// 一块不透明的Plane从屏幕左侧扫入盖住画面、在完全盖住的那一刻切换关卡
+// 内容(调用enterLevel)、再继续扫到右侧离开画面，全程不透明，"切换"的
+// 瞬间用户是看不见的，不会有"啪"一下的生硬感。挂在camera下，位置用
+// 本地X坐标做扫动，尺寸给得比较大(2x2.4)，确保不管视野边缘怎么样都能
+// 完全盖住。
+const wipeMat = new THREE.MeshBasicMaterial({ color: 0x080a10, depthTest: false, depthWrite: false });
+const wipeMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2.4), wipeMat);
+wipeMesh.position.set(-3, 0, -0.25);
+wipeMesh.renderOrder = 2100; // 比flash(2000)还高，转场时要盖过闪光效果
+wipeMesh.visible = false;
+camera.add(wipeMesh);
+
+const WIPE_DURATION = 0.9; // 秒，扫入+扫出的总时长
+let wipeState = null; // { startTime, nextLevelIndex, midpointFired }
+
+function startLevelWipe(nextLevelIndex) {
+  wipeState = { startTime: performance.now(), nextLevelIndex, midpointFired: false };
+  wipeMesh.visible = true;
+}
+
+function updateWipe(now) {
+  if (!wipeState) return;
+  const elapsed = (now - wipeState.startTime) / 1000;
+  if (elapsed >= WIPE_DURATION) {
+    wipeState = null;
+    wipeMesh.visible = false;
+    return;
+  }
+
+  const t = elapsed / WIPE_DURATION;
+  // 前一半：从左侧(-3)扫到居中(0)；后一半：从居中扫到右侧(3)离开
+  const x = t < 0.5 ? lerp(-3, 0, t / 0.5) : lerp(0, 3, (t - 0.5) / 0.5);
+  wipeMesh.position.x = x;
+
+  // 画面被完全盖住的那个中点，正是切换关卡内容的时机——这一帧用户看到
+  // 的是纯色遮罩，不会露出"切换过程"
+  if (!wipeState.midpointFired && t >= 0.5) {
+    wipeState.midpointFired = true;
+    enterLevel(wipeState.nextLevelIndex);
+  }
+}
+
 // ---------- 过关音效：8-bit风格的上扬音阶 ----------
 function playLevelCompleteSound() {
   const notes = [523, 659, 784, 988, 1175]; // C5-E5-G5-B5-D6，简单大调琶音上行
@@ -1160,11 +1203,11 @@ function onLevelComplete() {
   triggerFlash(0xffffff, 450);
   playLevelCompleteSound();
   console.log('[level] 第', currentLevel + 1, '关完成！');
-  // TODO(阶段5)：现在是立即切换到下一关，阶段5要在这里插入一段擦除式转场
-  // Plane扫过画面，把下面这行enterLevel()的调用延迟到转场扫过画面的那一刻
-  // 再执行，视觉上才不会是"啪"一下瞬间切换。逻辑本身(该进哪一关)已经是对的。
   const nextLevel = (currentLevel + 1) % LEVEL_NAMES.length; // 打完第三关循环回第一关，还没做"全部通关"的专门画面
-  setTimeout(() => enterLevel(nextLevel), 500); // 留一点时间让白闪+音效播完，不要闪光还没消就已经在下一关了
+  // 留一点时间让白闪+音效播完，再启动擦除转场——转场扫到画面完全被盖住
+  // 的那一刻才会真正调用enterLevel()切换关卡内容(见updateWipe)，不是在
+  // 这里立即切换，用户不会看到"啪"一下的生硬瞬间切换。
+  setTimeout(() => startLevelWipe(nextLevel), 500);
 }
 
 function loseLife() {
@@ -2082,6 +2125,7 @@ function animate() {
   updateSplatEffects(dt);
   updateTargetShake(dt);
   updateFlash(now);
+  updateWipe(now);
   updateGhostHand(now);
   updateEnemy(dt);
   updateProtectedFlinch(dt);
