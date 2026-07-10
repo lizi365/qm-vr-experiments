@@ -1192,6 +1192,11 @@ function restartLevel() {
   drawHeartsHUD();
   drawProgressBar();
   resetDartToIdle();
+  // 重开这一关要把"还没投过"的提示文字带回来（这次重新来过，教学提示
+  // 理应重新出现）；但幽灵手柄引导动画不重播——那是"整体只演示一次"的
+  // 东西，不是"每次重开都要看一遍"，重开太多次反复放同一段引导反而烦人。
+  hasThrownOnce = false;
+  drawHintText();
   console.log('[level] 重开第', currentLevel + 1, '关');
 }
 
@@ -1207,6 +1212,144 @@ window.addEventListener('keydown', (e) => {
     }
   }
 });
+
+// ========== 第一关（教学关）专属内容：幽灵手柄引导 + 首次投掷提示 ==========
+// 这一段只在currentLevel===0时生效，跟第二/三关的具体内容无关，不影响
+// 上面刚做完的通用框架。
+
+// ---------- 幽灵手柄引导动画 ----------
+// 一个半透明的简化手柄模型（胶囊体+一个小圆环示意扳机护圈），沿一段写死
+// 的关键帧路径播放一次"靠近→握持→后摆蓄力→前甩投掷→淡出"的动作，进VR
+// 后自动播放一遍，不需要真的做骨骼/IK系统，纯粹是关键帧位置/旋转插值。
+function buildGhostHand() {
+  const group = new THREE.Group();
+  const ghostMat = new THREE.MeshBasicMaterial({
+    color: 0x9fd8ff, transparent: true, opacity: 0.55, depthWrite: false,
+  });
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.028, 0.09, 4, 8), ghostMat);
+  body.rotation.x = Math.PI / 2.2; // 让胶囊体的长轴大致沿"握持"的方向倾斜
+  group.add(body);
+
+  const guard = new THREE.Mesh(new THREE.TorusGeometry(0.03, 0.006, 6, 12), ghostMat);
+  guard.position.set(0, -0.02, 0.05);
+  group.add(guard);
+
+  return group;
+}
+const ghostHand = buildGhostHand();
+ghostHand.visible = false;
+scene.add(ghostHand);
+
+// 关键帧：靠近待抓取位置 → 停留模拟"握持" → 后摆蓄力 → 前甩投掷 → 淡出。
+// 位置数值是相对IDLE_POS估的一个大致合理的引导轨迹，不追求精确，能让人
+// 看懂"这是在演示抓取+投掷"这个意图就够了。
+const GHOST_KEYFRAMES = [
+  { t: 0.0, pos: [0.18, 1.28, -0.15], rot: [0, 0.3, 0], opacity: 0 },
+  { t: 0.3, pos: [0.18, 1.28, -0.15], rot: [0, 0.3, 0], opacity: 0.55 },
+  { t: 0.9, pos: [0.03, 1.30, -0.33], rot: [0, 0.1, 0], opacity: 0.55 }, // 靠近飞镖
+  { t: 1.3, pos: [0.03, 1.30, -0.33], rot: [0, 0.1, 0], opacity: 0.75 }, // "握持"瞬间，稍微更亮一点示意按下
+  { t: 1.8, pos: [0.28, 1.55, 0.25], rot: [0.5, 0.3, 0.2], opacity: 0.75 }, // 后摆蓄力
+  { t: 2.3, pos: [-0.12, 1.32, -0.55], rot: [-0.6, -0.3, -0.2], opacity: 0.75 }, // 前甩投掷
+  { t: 2.9, pos: [-0.12, 1.32, -0.55], rot: [-0.6, -0.3, -0.2], opacity: 0 }, // 淡出
+];
+const GHOST_TOTAL_TIME = GHOST_KEYFRAMES[GHOST_KEYFRAMES.length - 1].t;
+
+let ghostHandPlaying = false;
+let ghostHandStartTime = 0;
+let ghostHandHasPlayedOnce = false;
+
+function playGhostHandTutorial() {
+  if (ghostHandHasPlayedOnce) return; // 只播一遍
+  ghostHandPlaying = true;
+  ghostHandHasPlayedOnce = true;
+  ghostHandStartTime = performance.now();
+  ghostHand.visible = true;
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function updateGhostHand(now) {
+  if (!ghostHandPlaying) return;
+  const elapsed = (now - ghostHandStartTime) / 1000;
+
+  if (elapsed >= GHOST_TOTAL_TIME) {
+    ghostHandPlaying = false;
+    ghostHand.visible = false;
+    return;
+  }
+
+  // 找到当前时间落在哪两个关键帧之间，做线性插值——关键帧数量很少(7个)，
+  // 直接线性扫描完全够用，不需要更复杂的查找结构
+  let k0 = GHOST_KEYFRAMES[0];
+  let k1 = GHOST_KEYFRAMES[GHOST_KEYFRAMES.length - 1];
+  for (let i = 0; i < GHOST_KEYFRAMES.length - 1; i++) {
+    if (elapsed >= GHOST_KEYFRAMES[i].t && elapsed <= GHOST_KEYFRAMES[i + 1].t) {
+      k0 = GHOST_KEYFRAMES[i];
+      k1 = GHOST_KEYFRAMES[i + 1];
+      break;
+    }
+  }
+  const segT = k1.t > k0.t ? (elapsed - k0.t) / (k1.t - k0.t) : 0;
+
+  ghostHand.position.set(
+    lerp(k0.pos[0], k1.pos[0], segT),
+    lerp(k0.pos[1], k1.pos[1], segT),
+    lerp(k0.pos[2], k1.pos[2], segT)
+  );
+  ghostHand.rotation.set(
+    lerp(k0.rot[0], k1.rot[0], segT),
+    lerp(k0.rot[1], k1.rot[1], segT),
+    lerp(k0.rot[2], k1.rot[2], segT)
+  );
+  const opacity = lerp(k0.opacity, k1.opacity, segT);
+  ghostHand.traverse((obj) => {
+    if (obj.material) obj.material.opacity = opacity;
+  });
+}
+
+// 进入VR后自动播一次（只在第一关生效），这是"开场"最自然的时机
+renderer.xr.addEventListener('sessionstart', () => {
+  if (currentLevel === 0) playGhostHandTutorial();
+});
+
+// ---------- 首次投掷提示文字 ----------
+// 第一次投掷完成前，在进度条下方显示一行提示；投掷一次（不管命不命中）
+// 之后自动隐藏，不用等命中才消失——"投一次就知道怎么玩了"比"必须先打中"
+// 更符合"新手友好"的教学关设计意图。
+let hasThrownOnce = false;
+
+const hintCanvas = document.createElement('canvas');
+hintCanvas.width = 512;
+hintCanvas.height = 60;
+const hintCtx = hintCanvas.getContext('2d');
+const hintTexture = new THREE.CanvasTexture(hintCanvas);
+const hintMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.5, 0.0586),
+  new THREE.MeshBasicMaterial({ map: hintTexture, transparent: true, depthTest: false })
+);
+hintMesh.position.set(0, 0.255, -0.55); // 紧贴在进度条下方
+hintMesh.renderOrder = 999;
+camera.add(hintMesh);
+
+function drawHintText() {
+  const ctx = hintCtx;
+  ctx.clearRect(0, 0, 512, 60);
+  if (!hasThrownOnce && currentLevel === 0) {
+    ctx.fillStyle = 'rgba(5,10,20,0.65)';
+    ctx.beginPath();
+    ctx.roundRect(0, 0, 512, 60, 10);
+    ctx.fill();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '22px sans-serif';
+    ctx.fillStyle = '#ffe27f';
+    ctx.fillText('投中靶心得分更高，试试看！', 256, 32);
+  }
+  hintTexture.needsUpdate = true;
+  hintMesh.visible = !hasThrownOnce && currentLevel === 0;
+}
+drawHintText();
 
 const tmpControllerPos = new THREE.Vector3();
 const tmpControllerQuat = new THREE.Quaternion();
@@ -1443,6 +1586,10 @@ function resolveThrow(scoreValue, hitPoint) {
   // 的敌人命中判定，到时候会在那边调用applyScoreAndCombo，不是在这里。
   if (currentLevel === 0) {
     applyScoreAndCombo(scoreValue);
+    if (!hasThrownOnce) {
+      hasThrownOnce = true;
+      drawHintText(); // 第一次投掷完成(不管命不命中)，隐藏教学提示
+    }
   }
 
   resetDartToIdle();
@@ -1567,6 +1714,7 @@ function animate() {
   updateSplatEffects(dt);
   updateTargetShake(dt);
   updateFlash(now);
+  updateGhostHand(now);
 
   // 面板始终朝向摄像机（billboard）
   panel.quaternion.copy(camera.quaternion);
