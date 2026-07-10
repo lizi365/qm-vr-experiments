@@ -1200,6 +1200,155 @@ function restartLevel() {
   console.log('[level] 重开第', currentLevel + 1, '关');
 }
 
+// ========== 通用"移动敌人 + 被保护对象"框架 ==========
+// 第二关(狐狸/兔子)、第三关(狼/小羊)都用这一套：横向来回移动、命中判定、
+// 命中后消失+延迟重生、靠近保护对象判定+扣命、保护对象受惊反弹动画。
+// 这一阶段只写通用机制本身，还没有接入具体关卡内容——enemyGroup在没有
+// 关卡调用setupEnemyLevel()之前一直是null，updateEnemy()/updateProtected
+// Flinch()对此完全安全（开头就return），不会影响第一关的任何现有行为。
+let enemyGroup = null;
+let protectedGroupRef = null;
+let protectedBaseY = 0;
+let enemyConfig = null;
+// enemyConfig结构：{ pathMinX, pathMaxX, y, z, baseSpeed, dangerDistance,
+//   speedRampInterval, speedRampAmount,           // 第二关：每隔多久提速多少
+//   sprintEnabled, sprintInterval, sprintDuration, sprintMultiplier } // 第三关：偶尔冲刺
+
+let enemyDirection = 1;
+let enemySpeed = 0;
+let enemyAlive = true;
+let enemyRespawnTimer = 0;
+let enemySprinting = false;
+let enemySprintTimer = 0;
+let levelElapsedTime = 0;
+
+const ENEMY_RESPAWN_DELAY = 1.5; // 秒，命中敌人后多久重新出现（用户给的范围是1~2秒，取中间值）
+const ENEMY_HIT_RADIUS = 0.18; // 米，投掷物命中点距敌人当前位置多近算命中
+
+// 关卡接入时调用一次，把敌人/保护对象的Object3D和运动参数注册进来
+function setupEnemyLevel(enemyGrp, protectedGrp, config) {
+  enemyGroup = enemyGrp;
+  protectedGroupRef = protectedGrp;
+  protectedBaseY = protectedGrp.position.y;
+  enemyConfig = config;
+  enemyDirection = 1;
+  enemySpeed = config.baseSpeed;
+  enemyAlive = true;
+  enemyRespawnTimer = 0;
+  enemySprinting = false;
+  enemySprintTimer = 0;
+  levelElapsedTime = 0;
+  enemyGroup.position.set(config.pathMinX, config.y, config.z);
+  enemyGroup.visible = true;
+}
+
+// 关卡切换/结束时调用，清掉引用，animate()里的updateEnemy会自动变成no-op
+function teardownEnemyLevel() {
+  enemyGroup = null;
+  protectedGroupRef = null;
+  enemyConfig = null;
+}
+
+function updateEnemy(dt) {
+  if (!enemyGroup || !enemyConfig) return;
+  levelElapsedTime += dt;
+
+  // 第二关用：每隔speedRampInterval秒基础速度提升speedRampAmount
+  if (enemyConfig.speedRampInterval) {
+    const ramps = Math.floor(levelElapsedTime / enemyConfig.speedRampInterval);
+    enemySpeed = enemyConfig.baseSpeed + ramps * enemyConfig.speedRampAmount;
+  }
+
+  if (!enemyAlive) {
+    enemyRespawnTimer -= dt;
+    if (enemyRespawnTimer <= 0) {
+      enemyAlive = true;
+      enemyGroup.visible = true;
+      enemyGroup.position.set(enemyConfig.pathMinX, enemyConfig.y, enemyConfig.z);
+      enemyDirection = 1;
+      enemySprinting = false;
+      enemySprintTimer = 0;
+    }
+    return;
+  }
+
+  // 第三关用："偶尔冲刺"：每隔sprintInterval秒触发一次持续sprintDuration秒
+  // 的加速冲刺，速度乘sprintMultiplier
+  let speed = enemySpeed;
+  if (enemyConfig.sprintEnabled) {
+    enemySprintTimer += dt;
+    if (!enemySprinting && enemySprintTimer >= enemyConfig.sprintInterval) {
+      enemySprinting = true;
+      enemySprintTimer = 0;
+    } else if (enemySprinting && enemySprintTimer >= enemyConfig.sprintDuration) {
+      enemySprinting = false;
+      enemySprintTimer = 0;
+    }
+    if (enemySprinting) speed *= enemyConfig.sprintMultiplier;
+  }
+
+  enemyGroup.position.x += speed * enemyDirection * dt;
+  if (enemyGroup.position.x >= enemyConfig.pathMaxX) {
+    enemyGroup.position.x = enemyConfig.pathMaxX;
+    enemyDirection = -1;
+  } else if (enemyGroup.position.x <= enemyConfig.pathMinX) {
+    enemyGroup.position.x = enemyConfig.pathMinX;
+    enemyDirection = 1;
+  }
+
+  if (protectedGroupRef) {
+    const dist = Math.abs(enemyGroup.position.x - protectedGroupRef.position.x);
+    if (dist < enemyConfig.dangerDistance) {
+      onEnemyReachedProtected();
+    }
+  }
+}
+
+function onEnemyReachedProtected() {
+  loseLife();
+  enemyAlive = false;
+  enemyGroup.visible = false;
+  enemyRespawnTimer = ENEMY_RESPAWN_DELAY;
+  triggerProtectedFlinch();
+}
+
+// 供resolveThrow()调用（阶段4接入）：投掷物命中靶平面的位置离敌人当前
+// 位置够近就算命中，命中后敌人消失+延迟重生。返回是否命中，方便调用方
+// 决定要不要触发对应的视觉/音效反馈。
+function tryHitEnemy(hitX, hitY) {
+  if (!enemyGroup || !enemyAlive) return false;
+  const dx = hitX - enemyGroup.position.x;
+  const dy = hitY - enemyGroup.position.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < ENEMY_HIT_RADIUS) {
+    enemyAlive = false;
+    enemyGroup.visible = false;
+    enemyRespawnTimer = ENEMY_RESPAWN_DELAY;
+    return true;
+  }
+  return false;
+}
+
+// 被保护对象的受惊反应：短促的上下弹动，不是精确的物理模拟，纯粹是
+// 一个衰减的正弦位移
+let protectedFlinchTime = 0;
+const PROTECTED_FLINCH_DURATION = 0.4;
+
+function triggerProtectedFlinch() {
+  protectedFlinchTime = PROTECTED_FLINCH_DURATION;
+}
+
+function updateProtectedFlinch(dt) {
+  if (!protectedGroupRef) return;
+  if (protectedFlinchTime > 0) {
+    protectedFlinchTime = Math.max(0, protectedFlinchTime - dt);
+    const t = protectedFlinchTime / PROTECTED_FLINCH_DURATION;
+    protectedGroupRef.position.y = protectedBaseY + Math.abs(Math.sin(t * Math.PI * 4)) * 0.06 * t;
+  } else if (protectedGroupRef.position.y !== protectedBaseY) {
+    protectedGroupRef.position.y = protectedBaseY;
+  }
+}
+
 // 桌面模式调试用：没有VR手柄没法真实触发"敌人靠近扣命"（第三阶段才有敌人），
 // 按L键手动模拟扣一条命，方便在没有头显的情况下也能验证生命值/闪光/
 // 重开这一整条流程能不能跑通。只在桌面模式下生效，不影响VR体验。
@@ -1715,6 +1864,8 @@ function animate() {
   updateTargetShake(dt);
   updateFlash(now);
   updateGhostHand(now);
+  updateEnemy(dt);
+  updateProtectedFlinch(dt);
 
   // 面板始终朝向摄像机（billboard）
   panel.quaternion.copy(camera.quaternion);
