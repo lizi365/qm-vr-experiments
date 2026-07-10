@@ -32,7 +32,8 @@
 
 <div id="info">
   <b>Demo Dart · 抓取投掷交互测试</b><br/>
-  VR模式：按住手柄<b>抓握键(squeeze/grip)</b>抓住飞镖，甩动手柄后松开投掷<br/>
+  VR模式：按住手柄<b>扳机键(trigger)</b>抓住飞镖，甩动手柄后松开投掷<br/>
+  退出VR用<b>抓握键(squeeze/grip)</b>指向右下方面板<br/>
   靶心10分，往外依次 8 / 6 / 4 / 2 分，脱靶0分<br/>
   <span class="warn">桌面模式仅供预览，无法模拟抓取投掷手感</span>
 </div>
@@ -65,7 +66,8 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer));
+const vrButton = VRButton.createButton(renderer);
+document.body.appendChild(vrButton);
 
 const ambient = new THREE.AmbientLight(0x445577, 0.6);
 scene.add(ambient);
@@ -166,18 +168,42 @@ const dart = buildDart();
 scene.add(dart);
 
 // ---------- 音效：Web Audio API合成，不引入外部音频文件 ----------
-// AudioContext要在用户手势之后才能真正发声（浏览器自动播放限制），这里
-// 用懒加载，第一次抓取时才真正创建/resume，不在页面加载时就建。
+// 排查记录（2026-07-10）：上一版实机测试完全没有声音，原因是AudioContext
+// 的resume()只有在真正的"用户手势"调用栈里发起才会生效——之前唯一调用
+// ensureAudio()的地方是grabDart()，而grabDart()同时被两条路径调用：
+// 原生事件（当时是squeezestart，现在改成selectstart了，道理一样——这是
+// 真实的用户手势）、和每帧轮询的updateAnalogGrabInput()（这只是渲染循环
+// 里的普通函数调用，不算用户手势）。
+// 因为轮询每帧都在跑，几乎总是比原生事件先摸到抓取阈值、抢先调用
+// grabDart()——而grabDart()内部有状态守卫，抢到的那次执行完，原生事件
+// 触发时状态已经不是IDLE了，直接return，playGrabSound()根本没机会在
+// "真手势"的调用栈里跑。resume()在非手势上下文里静默失败、不报错，
+// 现象就是"完全没有声音、控制台也没有报错"，跟猜测的一致。
+//
+// 修法：把第一次resume()尝试挪到"Enter VR"按钮的click事件里——这是唯一
+// 100%保证是真实用户手势的时机，比任何抓取事件都更早、更可靠。
 let audioCtx = null;
 function ensureAudio() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    console.log('[audio] AudioContext created, initial state =', audioCtx.state);
   }
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
+  if (audioCtx.state !== 'running') {
+    audioCtx.resume().then(() => {
+      console.log('[audio] resume() resolved, state =', audioCtx.state);
+    }).catch((err) => {
+      console.warn('[audio] resume() rejected', err);
+    });
   }
   return audioCtx;
 }
+
+// "Enter VR"按钮的click是最可靠的真实用户手势来源，在这里第一次尝试
+// resume，比等第一次抓取更早、更保险。
+vrButton.addEventListener('click', () => {
+  console.log('[audio] Enter VR clicked, attempting audio resume from a real user gesture');
+  ensureAudio();
+});
 
 // 一段短促的音调，用振荡器+包络实现，type控制音色（sine柔和/triangle明亮/
 // square更"哒"一点的打击感），freqEnd可选——传了就做一个音高滑动（用在抓取
@@ -267,13 +293,21 @@ for (const [scoreKey, cfg] of Object.entries(RATING_CONFIG)) {
   rctx.fillText(cfg.text, 200, 70);
   ratingTextures[scoreKey] = new THREE.CanvasTexture(c);
 }
+console.log('[rating] 贴图已生成，keys =', Object.keys(ratingTextures)); // 排查用：确认贴图确实建好了、key对不对
 
 const RATING_LIFETIME = 1500; // ms
 const ratingTexts = []; // { mesh, createdAt, baseY }
 
+// 排查记录（2026-07-10）：上一版实机测试评级文字完全没出现，代码走查没找到
+// 明显的"接错线"问题（贴图生成、resolveThrow调用链、scene.add都看起来是对
+// 的），怀疑要么是这里有个还没发现的隐藏bug，要么是当时的测试投掷根本没有
+// 打到6环以上（只有6/8/10分才弹字，2/4分和脱靶只有命中标记点，没有文字）。
+// 没有实机验证不能瞎猜，所以先加日志，下次测试时看这几行有没有打印、
+// scoreValue具体是多少，再决定要不要动这块逻辑。
 function spawnRatingText(x, y, scoreValue) {
   const texture = ratingTextures[scoreValue];
-  if (!texture) return; // 2/4/0分不弹字
+  console.log('[rating] spawnRatingText被调用, scoreValue =', scoreValue, ', 找到贴图 =', !!texture);
+  if (!texture) return; // 2/4/0分不弹字，本身不是bug——只是没有对应贴图，正常return
 
   const mat = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false });
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.112), mat);
@@ -281,6 +315,7 @@ function spawnRatingText(x, y, scoreValue) {
   mesh.position.set(x, baseY, TARGET_POS.z + 0.01); // 比命中标记点更靠摄像机一点，避免叠在一起z-fighting
   mesh.renderOrder = 1000;
   scene.add(mesh);
+  console.log('[rating] mesh已生成并add到scene，位置 =', mesh.position.toArray());
   ratingTexts.push({ mesh, createdAt: performance.now(), baseY });
 }
 
@@ -349,29 +384,51 @@ function resetDartToIdle() {
   posHistory = [];
 }
 
-// ---------- 抓握输入：squeeze原生事件 + 模拟量阈值双通道 ----------
-// 之前只依赖squeezestart/squeezeend这两个二值化事件，真机反馈"按了经常没
-// 反应"——这两个事件的实际触发时机是浏览器/运行时自己决定的，不透明也不
-// 一定够灵敏。改法：如果WebXR Gamepad暴露了模拟量（button.value，0~1连续
-// 值），改成每帧轮询，用一个明显低于"按到底"的阈值触发抓取，响应更快；
-// 原生squeezestart/squeezeend继续保留作为兜底——万一某些输入源真的拿不到
-// 模拟量（inputSource.gamepad不存在），至少还有原生事件能用。
-// grabDart/releaseDart两条路径最终都收敛到同一组函数，本身是幂等的（状态
-// 不对就直接return），两条路径同时挂着不会互相打架，谁先触发算谁的。
+// ---------- 抓取输入：原生事件 + 模拟量阈值双通道 ----------
+// 之前用squeeze(抓握键)判定抓取，2026-07-10测试确认响应正常，但用户反馈
+// trigger(食指扳机)更符合"抓取/发射"类动作的生理直觉——抓取判定改成读
+// trigger，之前调好的响应机制（阈值滞回、预抓取发光）原样保留，只是换了
+// 监听的物理按键源。
+//
+// GRAB_BUTTON_INDEX=0是WebXR "xr-standard"手柄映射的约定值（0=trigger，
+// 1=squeeze），但这个约定有没有真的对应Pico实机的按键布局，之前从来没有
+// 实测确认过。下面的logGamepadButtonChanges()是专门加来验证这件事的：
+// 进VR后随便按一个键，控制台会打印出是哪个buttons[i]的value在变化，
+// 拿真实数据核对——不能凭标准映射就假设"肯定是这样"。
 const GRAB_THRESHOLD = 0.6;    // 模拟量超过这个值，判定为"确实抓住了"
 const RELEASE_THRESHOLD = 0.45; // 比GRAB_THRESHOLD低一截，做个迟滞区间，避免数值在临界点抖动导致反复抓/放
 const PRE_GRAB_THRESHOLD = 0.3; // 超过这个值但还没到GRAB_THRESHOLD，触发"预抓取"发光提示
-const SQUEEZE_BUTTON_INDEX = 1; // xr-standard手柄映射的约定：0=trigger扳机，1=squeeze抓握键
+const GRAB_BUTTON_INDEX = 0; // xr-standard映射：0=trigger扳机（这次改用的键），1=squeeze抓握键（现在给退出按钮用）
 
 const inputSources = [null, null]; // 对应 controller0/controller1 的 XRInputSource，从connected事件拿
 
-function getSqueezeValue(idx) {
+function getGrabButtonValue(idx) {
   const src = inputSources[idx];
   const gp = src && src.gamepad;
   if (!gp) return null; // 拿不到模拟量数据，调用方要fallback到原生事件
-  const btn = gp.buttons[SQUEEZE_BUTTON_INDEX];
+  const btn = gp.buttons[GRAB_BUTTON_INDEX];
   if (!btn) return null;
   return typeof btn.value === 'number' ? btn.value : (btn.pressed ? 1 : 0);
+}
+
+// 排查用：打印手柄按键实测数据，验证GRAB_BUTTON_INDEX这个索引到底对不对。
+// 按边沿触发（从没按到按下的那一帧才打印一次），不是每帧打印，不然按住
+// 不放的时候控制台会被刷屏。进VR后依次单独按trigger、squeeze等按键，
+// 观察打印出来的buttons[i]分别是哪个索引，跟GRAB_BUTTON_INDEX/退出按钮
+// 用的squeeze索引对照，确认改对了键位。
+const prevButtonActive = [[], []];
+function logGamepadButtonChanges(idx) {
+  const src = inputSources[idx];
+  const gp = src && src.gamepad;
+  if (!gp) return;
+  gp.buttons.forEach((btn, i) => {
+    const active = btn.value > 0.1 || btn.pressed;
+    const wasActive = prevButtonActive[idx][i] || false;
+    if (active && !wasActive) {
+      console.log(`[按键排查] controller${idx} buttons[${i}] 按下了, value=${btn.value.toFixed(2)}`);
+    }
+    prevButtonActive[idx][i] = active;
+  });
 }
 
 let hintOn = false; // 预抓取发光提示是否激活，animate()里读这个来驱动呼吸动画
@@ -437,9 +494,11 @@ function releaseDart(controller) {
 function attachControllerEvents(controller, idx) {
   controller.addEventListener('connected', (e) => { inputSources[idx] = e.data; });
   controller.addEventListener('disconnected', () => { inputSources[idx] = null; });
-  // 原生事件：兜底路径，万一模拟量拿不到，至少这条还能用
-  controller.addEventListener('squeezestart', () => grabDart(controller));
-  controller.addEventListener('squeezeend', () => releaseDart(controller));
+  // 原生事件：兜底路径，万一模拟量拿不到，至少这条还能用。trigger对应的
+  // WebXR标准事件名是select/selectstart/selectend（这是规范定义的固定
+  // 名字，不是设备相关的东西，不需要像按钮索引那样实测确认）。
+  controller.addEventListener('selectstart', () => grabDart(controller));
+  controller.addEventListener('selectend', () => releaseDart(controller));
   scene.add(controller);
 }
 
@@ -450,11 +509,14 @@ attachControllerEvents(controller1, 1);
 
 // 每帧轮询模拟量，驱动更灵敏的抓取判定 + 预抓取发光提示
 function updateAnalogGrabInput() {
+  logGamepadButtonChanges(0);
+  logGamepadButtonChanges(1);
+
   let hint = false;
   const controllers = [controller0, controller1];
   for (let i = 0; i < controllers.length; i++) {
     const controller = controllers[i];
-    const value = getSqueezeValue(i);
+    const value = getGrabButtonValue(i);
     if (value === null) continue; // 这只手没有可用的模拟量，交给原生事件兜底
 
     if (dartState === STATE.IDLE) {
@@ -583,6 +645,7 @@ function colorForScore(scoreValue) {
 // hitPoint为{x,y,dist}表示这一次确实穿过了靶平面（不管有没有落在环内），
 // 为null表示是"落地/超时"兜底判的脱靶，没有真实穿越点可标记。
 function resolveThrow(scoreValue, hitPoint) {
+  console.log('[throw] resolveThrow被调用, scoreValue =', scoreValue, ', hitPoint =', hitPoint);
   lastScore = scoreValue;
   totalScore += scoreValue;
   throwCount += 1;

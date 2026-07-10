@@ -11,12 +11,12 @@
 //   // 在animate()里每帧调用一次：
 //   exitButton.update();
 //
-// 交互方式：手柄射线指向面板 + 按扳机键(select/trigger)，调用
-// renderer.xr.getSession().end() 优雅退出。故意用trigger而不是squeeze，
-// 是因为squeeze在demo-dart里已经被占用为"抓取飞镖"的手势，用trigger
-// 才不会互相打架（demo1的trigger虽然也用来切换粒子档位，但那个逻辑是
-// "不管指哪都会响应"，跟这里"必须真的指着面板才响应"不冲突，两边各自
-// 独立触发，互不影响）。
+// 交互方式：手柄射线指向面板 + 按抓握键(squeeze/grip)，调用
+// renderer.xr.getSession().end() 优雅退出。2026-07-10改成squeeze——
+// demo-dart的抓取手势从squeeze换成了trigger(select)，这里跟着换成squeeze
+// 才不会互相打架。demo1的trigger(select)绑定的是"切换粒子档位"，逻辑是
+// "不管指哪都会响应"，这里改用squeeze跟它完全不共享按键，也不冲突；
+// demo0没有绑定任何自定义手柄事件，同样安全。
 
 import * as THREE from 'three';
 
@@ -52,7 +52,7 @@ export function createXRExitButton(renderer, camera, controllers) {
     ctx.fillText('退出 VR', canvas.width / 2, 78);
     ctx.font = '22px sans-serif';
     ctx.fillStyle = hovered ? '#ffcfc0' : '#7f96ac';
-    ctx.fillText('手柄射线指向 + 扳机', canvas.width / 2, 118);
+    ctx.fillText('手柄射线指向 + 抓握键', canvas.width / 2, 118);
 
     texture.needsUpdate = true;
   }
@@ -69,12 +69,12 @@ export function createXRExitButton(renderer, camera, controllers) {
   const raycaster = new THREE.Raycaster();
   const rayOrigin = new THREE.Vector3();
   const rayDir = new THREE.Vector3();
-  let pendingSelect = [];
+  let pendingSqueeze = [];
   let wasHovered = false;
 
   controllers.forEach((controller) => {
-    controller.addEventListener('selectstart', () => {
-      pendingSelect.push(controller);
+    controller.addEventListener('squeezestart', () => {
+      pendingSqueeze.push(controller);
     });
   });
 
@@ -107,15 +107,15 @@ export function createXRExitButton(renderer, camera, controllers) {
       wasHovered = hoveredNow;
     }
 
-    if (pendingSelect.length > 0) {
-      for (const controller of pendingSelect) {
+    if (pendingSqueeze.length > 0) {
+      for (const controller of pendingSqueeze) {
         if (controllerHitsPanel(controller)) {
           const session = renderer.xr.getSession();
           if (session) session.end();
           break;
         }
       }
-      pendingSelect = [];
+      pendingSqueeze = [];
     }
   }
 
