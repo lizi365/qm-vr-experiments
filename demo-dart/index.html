@@ -64,6 +64,14 @@ scene.fog = new THREE.Fog(FOREST_BG, 2, 9); // 比之前(3,14)更近更浓，视
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
 camera.position.set(0, 1.6, 2.2);
+// camera必须是scene的子节点：Three.js的render(scene, camera)只从scene开始
+// 递归遍历渲染列表（见WebGLRenderer.projectObject），camera.add(mesh)挂出来的
+// 所有HUD（生命值/进度条/提示文字/道具选择面板/退出VR面板/转场遮罩/结算面板，
+// 共8个）如果camera本身不在scene里，就永远不会被遍历到，完全不会渲染——
+// 无论桌面预览还是真机，且不会报错，非常隐蔽。2026-07-10真机测试发现进度条
+// "完全看不见"，用Playwright加调试钩子实测scene.traverse()确认camera不在
+// 场景图里，加上这一行后所有相机挂载HUD同时恢复可见，才定位到这是唯一根因。
+scene.add(camera);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -936,7 +944,14 @@ function updateItemSelectPanel() {
 // ---------- 关卡配置 ----------
 // 阈值先给出一版合理估计，具体数值会写进README，方便后续实测后调整平衡性
 const LEVEL_NAMES = ['飞镖打靶', '番茄护兔', '斧子救羊'];
-const LEVEL_THRESHOLDS = [300, 500, 800]; // 第一关最低，逐关递增
+// 2026-07-10：第二关阈值从500下调到400。原因见README"第五轮真机反馈"一节，
+// 简述：ENEMY_HIT_SCORE固定8分/命中，连击顶格2.0倍，500分需要约33次命中
+// (哪怕全程不脱靶)，对"第二关"这个中间关卡来说绝对量偏多；这次同时修复了
+// 进度条不可见(玩家之前完全看不到还差多少)和把敌人从直线掃射改成"移动-
+// 停顿-移动"(停顿时是静止瞄准窗口，命中率应显著提升)，命中效率提升后，
+// 500分对应的实际耗时仍然偏长，所以在两项根因修复之后再下调阈值到400
+// (约25次命中)，跟第一关(300)/第三关(800)保持有区分度但不过分陡峭的曲线
+const LEVEL_THRESHOLDS = [300, 400, 800]; // 第一关最低，逐关递增
 let currentLevel = 0;
 
 // ---------- 生命值 ----------
@@ -1006,7 +1021,10 @@ const progressMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.5, 0.137),
   new THREE.MeshBasicMaterial({ map: progressTexture, transparent: true, depthTest: false })
 );
-progressMesh.position.set(0, 0.34, -0.55); // 视野正上方，跟心形HUD分开，避免拥挤
+// 2026-07-10：原来是0.34，在camera FOV=70°/z=-0.55的视锥里已经非常接近
+// 上边界（视锥半高约0.385），标题文字顶部会被裁切；改成0.29留出安全余量，
+// 避免真机FOV跟桌面预览不完全一致时进一步被裁得更多
+progressMesh.position.set(0, 0.29, -0.55);
 progressMesh.renderOrder = 999;
 camera.add(progressMesh);
 
@@ -1275,9 +1293,12 @@ let enemyRespawnTimer = 0;
 let enemySprinting = false;
 let enemySprintTimer = 0;
 let levelElapsedTime = 0;
+let enemyWaypointIndex = 0; // 途经点模式：当前朝哪个途经点走
+let enemyPauseTimer = 0;    // 途经点模式：到达途经点后的停留剩余时间，>0表示暂停中
+let enemyBobPhase = 0;      // 停留期间的上下浮动相位（"呵呵笑"待机动画）
 
 const ENEMY_RESPAWN_DELAY = 1.5; // 秒，命中敌人后多久重新出现（用户给的范围是1~2秒，取中间值）
-const ENEMY_HIT_RADIUS = 0.18; // 米，投掷物命中点距敌人当前位置多近算命中
+const ENEMY_HIT_RADIUS = 0.18; // 米，投掷物命中点距敌人当前位置多近算命中（默认值，各关可用config.hitRadius覆盖）
 
 // 关卡接入时调用一次，把敌人/保护对象的Object3D和运动参数注册进来
 function setupEnemyLevel(enemyGrp, protectedGrp, config) {
@@ -1291,13 +1312,21 @@ function setupEnemyLevel(enemyGrp, protectedGrp, config) {
   enemySprinting = false;
   enemySprintTimer = 0;
   levelElapsedTime = 0;
-  // 保护对象放在pathMinX那一侧(danger zone)，敌人要从pathMaxX(远端/安全端)
-  // 出发、朝pathMinX移动，玩家才有一段完整的巡逻时间可以反应。之前这里
-  // 写成从pathMinX出发，等于敌人一生成就已经站在危险区里，第一帧就扣命
-  // ——这是Playwright实测(直接调enterLevel(1)/(2)验证)时发现的真bug，
-  // 不是设计意图。
-  enemyDirection = -1; // 朝pathMinX(危险区)移动
-  enemyGroup.position.set(config.pathMaxX, config.y, config.z);
+  enemyWaypointIndex = 0;
+  enemyPauseTimer = 0;
+  enemyBobPhase = 0;
+  if (config.waypoints) {
+    // 途经点模式(目前第二关狐狸用)：从第一个途经点(约定为远端/安全端)出发
+    enemyGroup.position.set(config.waypoints[0], config.y, config.z);
+  } else {
+    // 保护对象放在pathMinX那一侧(danger zone)，敌人要从pathMaxX(远端/安全端)
+    // 出发、朝pathMinX移动，玩家才有一段完整的巡逻时间可以反应。之前这里
+    // 写成从pathMinX出发，等于敌人一生成就已经站在危险区里，第一帧就扣命
+    // ——这是Playwright实测(直接调enterLevel(1)/(2)验证)时发现的真bug，
+    // 不是设计意图。
+    enemyDirection = -1; // 朝pathMinX(危险区)移动
+    enemyGroup.position.set(config.pathMaxX, config.y, config.z);
+  }
   enemyGroup.visible = true;
 }
 
@@ -1323,10 +1352,16 @@ function updateEnemy(dt) {
     if (enemyRespawnTimer <= 0) {
       enemyAlive = true;
       enemyGroup.visible = true;
-      // 重生也要回到远端(pathMaxX)重新出发，跟setupEnemyLevel同样的道理，
-      // 不能直接生成在危险区里
-      enemyGroup.position.set(enemyConfig.pathMaxX, enemyConfig.y, enemyConfig.z);
-      enemyDirection = -1;
+      enemyWaypointIndex = 0;
+      enemyPauseTimer = 0;
+      if (enemyConfig.waypoints) {
+        enemyGroup.position.set(enemyConfig.waypoints[0], enemyConfig.y, enemyConfig.z);
+      } else {
+        // 重生也要回到远端(pathMaxX)重新出发，跟setupEnemyLevel同样的道理，
+        // 不能直接生成在危险区里
+        enemyGroup.position.set(enemyConfig.pathMaxX, enemyConfig.y, enemyConfig.z);
+        enemyDirection = -1;
+      }
       enemySprinting = false;
       enemySprintTimer = 0;
     }
@@ -1348,13 +1383,17 @@ function updateEnemy(dt) {
     if (enemySprinting) speed *= enemyConfig.sprintMultiplier;
   }
 
-  enemyGroup.position.x += speed * enemyDirection * dt;
-  if (enemyGroup.position.x >= enemyConfig.pathMaxX) {
-    enemyGroup.position.x = enemyConfig.pathMaxX;
-    enemyDirection = -1;
-  } else if (enemyGroup.position.x <= enemyConfig.pathMinX) {
-    enemyGroup.position.x = enemyConfig.pathMinX;
-    enemyDirection = 1;
+  if (enemyConfig.waypoints) {
+    updateWaypointMovement(dt, speed);
+  } else {
+    enemyGroup.position.x += speed * enemyDirection * dt;
+    if (enemyGroup.position.x >= enemyConfig.pathMaxX) {
+      enemyGroup.position.x = enemyConfig.pathMaxX;
+      enemyDirection = -1;
+    } else if (enemyGroup.position.x <= enemyConfig.pathMinX) {
+      enemyGroup.position.x = enemyConfig.pathMinX;
+      enemyDirection = 1;
+    }
   }
 
   if (protectedGroupRef) {
@@ -1362,6 +1401,37 @@ function updateEnemy(dt) {
     if (dist < enemyConfig.dangerDistance) {
       onEnemyReachedProtected();
     }
+  }
+}
+
+// 途经点巡逻：按固定顺序在waypoints之间移动，到达后停留pauseDuration秒
+// （期间做一个上下弹跳的"呵呵笑"待机动画），再继续朝下一个点前进，循环
+// 往复。全程严格按预设顺序走，不引入任何随机性——可预测性本身就是这类
+// 小游戏的乐趣来源(红白机式设计)，随机移动只会让玩家觉得"不公平"而不是
+// "有意思"，2026-07-10按用户明确要求做成这样，不做随机版本。
+function updateWaypointMovement(dt, speed) {
+  const wp = enemyConfig.waypoints;
+  const targetX = wp[enemyWaypointIndex];
+
+  if (enemyPauseTimer > 0) {
+    enemyPauseTimer -= dt;
+    enemyBobPhase += dt * 6;
+    enemyGroup.position.y = enemyConfig.y + Math.sin(enemyBobPhase) * 0.025;
+    if (enemyPauseTimer <= 0) {
+      enemyGroup.position.y = enemyConfig.y;
+      enemyWaypointIndex = (enemyWaypointIndex + 1) % wp.length;
+    }
+    return;
+  }
+
+  const dx = targetX - enemyGroup.position.x;
+  const step = speed * dt;
+  if (Math.abs(dx) <= step) {
+    enemyGroup.position.x = targetX;
+    enemyPauseTimer = enemyConfig.pauseDuration || 0;
+    enemyBobPhase = 0;
+  } else {
+    enemyGroup.position.x += Math.sign(dx) * step;
   }
 }
 
@@ -1381,7 +1451,8 @@ function tryHitEnemy(hitX, hitY) {
   const dx = hitX - enemyGroup.position.x;
   const dy = hitY - enemyGroup.position.y;
   const dist = Math.hypot(dx, dy);
-  if (dist < ENEMY_HIT_RADIUS) {
+  const hitRadius = (enemyConfig && enemyConfig.hitRadius) || ENEMY_HIT_RADIUS;
+  if (dist < hitRadius) {
     enemyAlive = false;
     enemyGroup.visible = false;
     enemyRespawnTimer = ENEMY_RESPAWN_DELAY;
@@ -1416,15 +1487,21 @@ function updateProtectedFlinch(dt) {
 
 function buildRabbit() {
   const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: 0xf2f2ee, roughness: 0.85 });
+  // 2026-07-10：颜色调得更偏纯白(0xf5f5f0)，跟狐狸的橙色系拉开辨识度；
+  // 耳朵加长(0.09->0.12)，视觉上更像兔子而不是"两个小尖角"
+  const mat = new THREE.MeshStandardMaterial({ color: 0xf5f5f0, roughness: 0.85 });
   const body = new THREE.Mesh(new THREE.SphereGeometry(0.08, 10, 8), mat);
   group.add(body);
   for (const side of [-1, 1]) {
-    const ear = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.017, 0.09, 6), mat);
-    ear.position.set(side * 0.03, 0.11, -0.01);
-    ear.rotation.z = side * 0.22;
+    const ear = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.016, 0.12, 6), mat);
+    ear.position.set(side * 0.03, 0.135, -0.01);
+    ear.rotation.z = side * 0.18;
     group.add(ear);
   }
+  // 小尾巴：贴在身体后方的小球，兔子最经典的视觉符号之一，之前完全没有
+  const tail = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 6), mat);
+  tail.position.set(-0.08, -0.01, 0);
+  group.add(tail);
   return group;
 }
 
@@ -1434,15 +1511,40 @@ function buildFox() {
   const body = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), furMat);
   body.scale.set(1.35, 0.9, 1); // 拉长一点，示意四足动物的身形轮廓
   group.add(body);
+
+  // 白色肚皮色块：贴在身体下方偏前，橙+白的撞色组合让玩家一眼就能跟
+  // 纯白色的兔子分开，之前狐狸整只都是橙色，容易被误认成"另一种兔子"
+  const bellyMat = new THREE.MeshStandardMaterial({ color: 0xfaf3e6, roughness: 0.75 });
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), bellyMat);
+  belly.scale.set(1.1, 0.6, 0.85);
+  belly.position.set(0.02, -0.04, 0);
+  group.add(belly);
+
   const head = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.09, 8), furMat);
   head.rotation.z = -Math.PI / 2;
   head.position.set(0.13, 0.02, 0);
   group.add(head);
+
+  // 三角尖耳朵：狐狸最标志性的轮廓特征，之前完全没做耳朵，是"认不出是
+  // 狐狸"的主因（一个光溜溜的橙色球谁都认不出来）
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.025, 0.05, 6), furMat);
+    ear.position.set(0.1, 0.075, side * 0.025);
+    ear.rotation.x = side * 0.3;
+    group.add(ear);
+  }
+
+  // 蓬松大尾巴：粗圆锥+球形尾尖堆叠出"毛茸茸"的体积感，比之前单薄的
+  // 细长圆锥更容易让人一眼联想到"狐狸尾巴"而不是"老鼠尾巴"
   const tipMat = new THREE.MeshStandardMaterial({ color: 0xf5ead4, roughness: 0.7 });
-  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.14, 6), tipMat);
-  tail.rotation.z = Math.PI / 2.6;
-  tail.position.set(-0.15, 0.04, 0);
-  group.add(tail);
+  const tailBase = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.16, 8), furMat);
+  tailBase.rotation.z = Math.PI / 2.4;
+  tailBase.position.set(-0.16, 0.03, 0);
+  group.add(tailBase);
+  const tailTip = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 6), tipMat);
+  tailTip.position.set(-0.24, 0.07, 0);
+  group.add(tailTip);
+
   return group;
 }
 
@@ -1481,6 +1583,7 @@ const rabbitGroup = buildRabbit();
 rabbitGroup.visible = false;
 scene.add(rabbitGroup);
 const foxGroup = buildFox();
+foxGroup.scale.setScalar(1.2); // 视觉上放大20%，不追求还原真实体型比例，优先保证移动靶容易被看清/瞄准
 foxGroup.visible = false;
 scene.add(foxGroup);
 const lambGroup = buildLamb();
@@ -1496,10 +1599,18 @@ scene.add(wolfGroup);
 const ENEMY_HIT_SCORE = 8; // 命中敌人算固定分值，够格触发连击(>=6)，也够格弹"GREAT!"评级文字
 const LEVEL_ENEMY_CONFIGS = [
   null,
-  { // 第二关：狐狸——每15秒基础速度+0.15m/s，逐步提升紧迫感
-    pathMinX: -1.2, pathMaxX: 1.2, y: 0.32, z: TARGET_POS.z,
-    baseSpeed: 0.5, dangerDistance: 0.25,
-    speedRampInterval: 15, speedRampAmount: 0.15,
+  { // 第二关：狐狸——途经点巡逻+停留模式(2026-07-10改版)。原来是两点间
+    // 匀速直线往返，路径短(2.4m)+从不停留，玩家反应窗口极短，一不留神
+    // 整个来回就错过了，也是"手都酸了还进不了第三关"的一部分原因。改成
+    // 5个途经点、每点停留1.3秒(带小跳动待机动画)，路径拉长到2.6m，从
+    // "一闪而过"变成"移动-停顿-移动"的节奏——停顿时是完整的静止瞄准
+    // 窗口，命中率应该明显提升，同时保持100%确定性路线(不引入随机)。
+    // hitRadius比默认的0.18m放宽到0.24m，配合途经点停顿双重降低难度。
+    waypoints: [1.3, 0.6, -0.1, -0.8, -1.3],
+    pauseDuration: 1.3,
+    y: 0.32, z: TARGET_POS.z,
+    baseSpeed: 0.42, dangerDistance: 0.25, hitRadius: 0.24,
+    speedRampInterval: 20, speedRampAmount: 0.08,
   },
   { // 第三关：狼——固定基础速度，但每4秒有一次0.8秒的冲刺(2.6倍速)
     pathMinX: -1.3, pathMaxX: 1.3, y: 0.36, z: TARGET_POS.z,
@@ -1715,7 +1826,7 @@ const hintMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.5, 0.0586),
   new THREE.MeshBasicMaterial({ map: hintTexture, transparent: true, depthTest: false })
 );
-hintMesh.position.set(0, 0.255, -0.55); // 紧贴在进度条下方
+hintMesh.position.set(0, 0.175, -0.55); // 跟着进度条一起下移，紧贴在新位置的进度条下方，避免重叠
 hintMesh.renderOrder = 999;
 camera.add(hintMesh);
 
@@ -1848,9 +1959,19 @@ function colorForScore(scoreValue) {
 // 在它身上做形变动画，飞回去的过程会同时在"跑"和"变形"，观感很怪。这个
 // 做法跟命中标记点/评级文字的生命周期管理是同一套模式。
 const SPLAT_LIFETIME = 550; // ms
+const MAX_SPLAT_EFFECTS = 10; // 同屏最多保留几个溅落效果，超过时先淘汰最老的一个，避免连击刷屏时贴图/网格堆积
 const splatEffects = []; // { splatMesh, chunkMeshes: [{mesh, vel}], createdAt }
 
 function spawnTomatoSplat(x, y) {
+  if (splatEffects.length >= MAX_SPLAT_EFFECTS) {
+    const oldest = splatEffects.shift();
+    scene.remove(oldest.splatMesh);
+    oldest.splatMesh.material.dispose();
+    for (const c of oldest.chunkMeshes) {
+      scene.remove(c.mesh);
+      c.mesh.material.dispose();
+    }
+  }
   const splatMat = new THREE.MeshBasicMaterial({ color: 0xcc2a1e, transparent: true });
   const splatMesh = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), splatMat);
   splatMesh.position.set(x, y, TARGET_POS.z + 0.008);
@@ -1954,6 +2075,7 @@ function resolveThrow(scoreValue, hitPoint) {
   // 这个固定分值。
   let effectiveScore;
   let hitSomething;
+  let enemyHit = false; // 只有第二/三关会用到，第一关始终保持false
 
   if (currentLevel === 0) {
     effectiveScore = scoreValue;
@@ -1965,7 +2087,7 @@ function resolveThrow(scoreValue, hitPoint) {
       spawnRatingText(hitPoint.x, hitPoint.y, scoreValue);
     }
   } else {
-    const enemyHit = hitPoint ? tryHitEnemy(hitPoint.x, hitPoint.y) : false;
+    enemyHit = hitPoint ? tryHitEnemy(hitPoint.x, hitPoint.y) : false;
     effectiveScore = enemyHit ? ENEMY_HIT_SCORE : 0;
     hitSomething = enemyHit;
     lastScore = effectiveScore;
@@ -1985,6 +2107,14 @@ function resolveThrow(scoreValue, hitPoint) {
     } else if (currentItemType === 'axe') {
       triggerTargetShake();
     }
+  } else if (currentLevel !== 0 && currentItemType === 'tomato' && hitPoint) {
+    // 番茄穿过了靶平面但没打中狐狸/狼——之前这种情况完全没有任何落点反馈，
+    // 玩家不知道自己到底偏了多少、偏向哪边。这里复用跟"命中"完全一样的
+    // 溅落效果，落在番茄实际穿过靶平面的坐标上，让偏差可视化，作用类似
+    // 命中标记(spawnHitMarker)之于第一关：给玩家一个诊断"我刚才差多少"的
+    // 视觉锚点。只有hitPoint存在(番茄确实飞到了靶平面)才有坐标可用；如果
+    // 是中途落地/超时(hitPoint为null)，没有明确落点，不生成溅落效果。
+    spawnTomatoSplat(hitPoint.x, hitPoint.y);
   }
 
   // 音效不管命不命中都会响，保持"每次投掷都有声音反馈"的一致行为
