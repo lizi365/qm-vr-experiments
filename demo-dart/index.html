@@ -142,9 +142,13 @@ const TREE_LAYOUT = [
   [-2.6, -1.5, 1.1], [2.8, -2.0, 1.3], [-3.2, -4.0, 1.5],
   [3.4, -4.5, 1.2], [-1.8, -6.0, 1.6],
 ];
-for (const [x, z, s] of TREE_LAYOUT) {
-  scene.add(buildTree(x, z, s));
-}
+// 存进数组是为了后面切关卡时能整体隐藏/显示——农场关(第二关)和狼关(第三关)
+// 不需要森林树影，之前这里是即用即弃的写法，现在需要保留引用
+const forestTrees = TREE_LAYOUT.map(([x, z, s]) => {
+  const t = buildTree(x, z, s);
+  scene.add(t);
+  return t;
+});
 
 // ---------- 飞镖靶：Canvas贴图画同心圆环，贴在一个Plane上 ----------
 const TARGET_POS = new THREE.Vector3(0, 1.5, -2.5);
@@ -1156,11 +1160,11 @@ function onLevelComplete() {
   triggerFlash(0xffffff, 450);
   playLevelCompleteSound();
   console.log('[level] 第', currentLevel + 1, '关完成！');
-  // TODO(阶段5)：这里要接关卡切换转场——擦除式Plane扫过画面，隐藏当前关卡
-  // 物体、加载下一关物体、currentLevel+1、levelScore/comboStreak清零。
-  // 现在只做即时反馈(闪光+音效)，还没有真的"进入下一关"，第一关打完之后
-  // 目前会停在同一个场景，进度条会一直显示"已通关"状态，这是阶段1的
-  // 已知限制，不是bug。
+  // TODO(阶段5)：现在是立即切换到下一关，阶段5要在这里插入一段擦除式转场
+  // Plane扫过画面，把下面这行enterLevel()的调用延迟到转场扫过画面的那一刻
+  // 再执行，视觉上才不会是"啪"一下瞬间切换。逻辑本身(该进哪一关)已经是对的。
+  const nextLevel = (currentLevel + 1) % LEVEL_NAMES.length; // 打完第三关循环回第一关，还没做"全部通关"的专门画面
+  setTimeout(() => enterLevel(nextLevel), 500); // 留一点时间让白闪+音效播完，不要闪光还没消就已经在下一关了
 }
 
 function loseLife() {
@@ -1197,6 +1201,13 @@ function restartLevel() {
   // 东西，不是"每次重开都要看一遍"，重开太多次反复放同一段引导反而烦人。
   hasThrownOnce = false;
   drawHintText();
+  // 第二/三关的重开还要把敌人放回起点、存活状态复位，保护对象的受惊
+  // 弹动也要清掉，不然重开之后敌人可能停在半路或者保护对象卡在弹起的
+  // 姿势上
+  if (enemyGroup && enemyConfig) {
+    setupEnemyLevel(enemyGroup, protectedGroupRef, enemyConfig);
+  }
+  protectedFlinchTime = 0;
   console.log('[level] 重开第', currentLevel + 1, '关');
 }
 
@@ -1231,14 +1242,19 @@ function setupEnemyLevel(enemyGrp, protectedGrp, config) {
   protectedGroupRef = protectedGrp;
   protectedBaseY = protectedGrp.position.y;
   enemyConfig = config;
-  enemyDirection = 1;
   enemySpeed = config.baseSpeed;
   enemyAlive = true;
   enemyRespawnTimer = 0;
   enemySprinting = false;
   enemySprintTimer = 0;
   levelElapsedTime = 0;
-  enemyGroup.position.set(config.pathMinX, config.y, config.z);
+  // 保护对象放在pathMinX那一侧(danger zone)，敌人要从pathMaxX(远端/安全端)
+  // 出发、朝pathMinX移动，玩家才有一段完整的巡逻时间可以反应。之前这里
+  // 写成从pathMinX出发，等于敌人一生成就已经站在危险区里，第一帧就扣命
+  // ——这是Playwright实测(直接调enterLevel(1)/(2)验证)时发现的真bug，
+  // 不是设计意图。
+  enemyDirection = -1; // 朝pathMinX(危险区)移动
+  enemyGroup.position.set(config.pathMaxX, config.y, config.z);
   enemyGroup.visible = true;
 }
 
@@ -1264,8 +1280,10 @@ function updateEnemy(dt) {
     if (enemyRespawnTimer <= 0) {
       enemyAlive = true;
       enemyGroup.visible = true;
-      enemyGroup.position.set(enemyConfig.pathMinX, enemyConfig.y, enemyConfig.z);
-      enemyDirection = 1;
+      // 重生也要回到远端(pathMaxX)重新出发，跟setupEnemyLevel同样的道理，
+      // 不能直接生成在危险区里
+      enemyGroup.position.set(enemyConfig.pathMaxX, enemyConfig.y, enemyConfig.z);
+      enemyDirection = -1;
       enemySprinting = false;
       enemySprintTimer = 0;
     }
@@ -1347,6 +1365,183 @@ function updateProtectedFlinch(dt) {
   } else if (protectedGroupRef.position.y !== protectedBaseY) {
     protectedGroupRef.position.y = protectedBaseY;
   }
+}
+
+// ========== 第二关：番茄护兔（狐狸/兔子） / 第三关：斧子救羊（狼/小羊） ==========
+// 结构复用上面刚做完的敌人/保护对象框架，这里只提供外观模型+关卡参数。
+// 都是程序化简单几何体拼接，不追求写实。
+
+function buildRabbit() {
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0xf2f2ee, roughness: 0.85 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.08, 10, 8), mat);
+  group.add(body);
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.017, 0.09, 6), mat);
+    ear.position.set(side * 0.03, 0.11, -0.01);
+    ear.rotation.z = side * 0.22;
+    group.add(ear);
+  }
+  return group;
+}
+
+function buildFox() {
+  const group = new THREE.Group();
+  const furMat = new THREE.MeshStandardMaterial({ color: 0xd9701f, roughness: 0.7 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), furMat);
+  body.scale.set(1.35, 0.9, 1); // 拉长一点，示意四足动物的身形轮廓
+  group.add(body);
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.09, 8), furMat);
+  head.rotation.z = -Math.PI / 2;
+  head.position.set(0.13, 0.02, 0);
+  group.add(head);
+  const tipMat = new THREE.MeshStandardMaterial({ color: 0xf5ead4, roughness: 0.7 });
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.14, 6), tipMat);
+  tail.rotation.z = Math.PI / 2.6;
+  tail.position.set(-0.15, 0.04, 0);
+  group.add(tail);
+  return group;
+}
+
+function buildLamb() {
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0xebe6da, roughness: 0.95 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), mat);
+  group.add(body);
+  const legMat = new THREE.MeshStandardMaterial({ color: 0x3a3128, roughness: 0.8 });
+  for (const [dx, dz] of [[-0.05, -0.05], [0.05, -0.05], [-0.05, 0.05], [0.05, 0.05]]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.07, 6), legMat);
+    leg.position.set(dx, -0.1, dz);
+    group.add(leg);
+  }
+  return group;
+}
+
+function buildWolf() {
+  const group = new THREE.Group();
+  const furMat = new THREE.MeshStandardMaterial({ color: 0x565a5e, roughness: 0.75 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), furMat);
+  body.scale.set(1.4, 0.9, 1);
+  group.add(body);
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.1, 8), furMat);
+  head.rotation.z = -Math.PI / 2;
+  head.position.set(0.15, 0.02, 0);
+  group.add(head);
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffdd44 });
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.013, 6, 6), eyeMat);
+  eye.position.set(0.19, 0.045, 0.025);
+  group.add(eye);
+  return group;
+}
+
+const rabbitGroup = buildRabbit();
+rabbitGroup.visible = false;
+scene.add(rabbitGroup);
+const foxGroup = buildFox();
+foxGroup.visible = false;
+scene.add(foxGroup);
+const lambGroup = buildLamb();
+lambGroup.visible = false;
+scene.add(lambGroup);
+const wolfGroup = buildWolf();
+wolfGroup.visible = false;
+scene.add(wolfGroup);
+
+// 敌人在靶平面同一个z深度巡逻(TARGET_POS.z)，这样才能复用受保护、没有改动
+// 过的碰撞检测代码块算出来的hitX/hitY——没有另起一套碰撞系统。保护对象
+// 固定站在敌人巡逻范围之外一点点，具体数值见README的平衡性参数说明。
+const ENEMY_HIT_SCORE = 8; // 命中敌人算固定分值，够格触发连击(>=6)，也够格弹"GREAT!"评级文字
+const LEVEL_ENEMY_CONFIGS = [
+  null,
+  { // 第二关：狐狸——每15秒基础速度+0.15m/s，逐步提升紧迫感
+    pathMinX: -1.2, pathMaxX: 1.2, y: 0.32, z: TARGET_POS.z,
+    baseSpeed: 0.5, dangerDistance: 0.25,
+    speedRampInterval: 15, speedRampAmount: 0.15,
+  },
+  { // 第三关：狼——固定基础速度，但每4秒有一次0.8秒的冲刺(2.6倍速)
+    pathMinX: -1.3, pathMaxX: 1.3, y: 0.36, z: TARGET_POS.z,
+    baseSpeed: 0.55, dangerDistance: 0.25,
+    sprintEnabled: true, sprintInterval: 4, sprintDuration: 0.8, sprintMultiplier: 2.6,
+  },
+];
+const PROTECTED_POS_BY_LEVEL = [
+  null,
+  new THREE.Vector3(-1.4, 0.3, TARGET_POS.z),
+  new THREE.Vector3(-1.5, 0.34, TARGET_POS.z),
+];
+
+// ---------- 场景基调切换：森林/农场/更暗的狼谷，色调区分，不做精细美术 ----------
+const LEVEL_THEMES = [
+  { // 第一关：现有的昏暗森林，数值跟phase1硬编码的完全一致
+    bg: 0x070a06, fogNear: 2, fogFar: 9, groundTint: 0xffffff,
+    ambientColor: 0x2a3a26, ambientIntensity: 0.55,
+    pointColor: 0xffcf8a, pointIntensity: 1.8, showTrees: true,
+  },
+  { // 第二关：农场草地，更亮更暖
+    bg: 0x1c2a10, fogNear: 3, fogFar: 12, groundTint: 0x8fbf6a,
+    ambientColor: 0x4a5a2a, ambientIntensity: 0.8,
+    pointColor: 0xfff2c0, pointIntensity: 2.2, showTrees: false,
+  },
+  { // 第三关：更暗更冷，呼应"更高难度"的直觉暗示
+    bg: 0x05060c, fogNear: 1.8, fogFar: 7, groundTint: 0x3a3a4c,
+    ambientColor: 0x1a1a2a, ambientIntensity: 0.4,
+    pointColor: 0x8a9aff, pointIntensity: 1.2, showTrees: false,
+  },
+];
+
+function applySceneTheme(theme) {
+  scene.background.set(theme.bg);
+  scene.fog.color.set(theme.bg);
+  scene.fog.near = theme.fogNear;
+  scene.fog.far = theme.fogFar;
+  ground.material.color.set(theme.groundTint);
+  ambient.color.set(theme.ambientColor);
+  ambient.intensity = theme.ambientIntensity;
+  point.color.set(theme.pointColor);
+  point.intensity = theme.pointIntensity;
+  forestTrees.forEach((t) => { t.visible = theme.showTrees; });
+}
+
+// ---------- 进入指定关卡：切场景/切敌人/切投掷物，即时生效(没有转场动画) ----------
+// 阶段5会在onLevelComplete()里包一层"擦除式转场"，把真正调用enterLevel()的
+// 时机延迟到转场Plane扫过画面的那一刻，视觉上不会看到"啪"一下瞬间切换。
+// 现在先保证内容本身是对的，转场是纯视觉包装，不影响这里的逻辑。
+function enterLevel(index) {
+  currentLevel = index;
+  levelScore = 0;
+  comboStreak = 0;
+  comboMultiplier = 1.0;
+  hasThrownOnce = false;
+  drawHintText(); // 内部会按currentLevel===0判断要不要显示，二三关自动不显示
+
+  applySceneTheme(LEVEL_THEMES[index]);
+
+  targetMesh.visible = index === 0;
+  backboard.visible = index === 0;
+  rabbitGroup.visible = false;
+  foxGroup.visible = false;
+  lambGroup.visible = false;
+  wolfGroup.visible = false;
+
+  if (index === 0) {
+    teardownEnemyLevel();
+    switchItemType('dart');
+  } else if (index === 1) {
+    rabbitGroup.visible = true;
+    foxGroup.visible = true;
+    rabbitGroup.position.copy(PROTECTED_POS_BY_LEVEL[1]);
+    setupEnemyLevel(foxGroup, rabbitGroup, LEVEL_ENEMY_CONFIGS[1]);
+    switchItemType('tomato');
+  } else if (index === 2) {
+    lambGroup.visible = true;
+    wolfGroup.visible = true;
+    lambGroup.position.copy(PROTECTED_POS_BY_LEVEL[2]);
+    setupEnemyLevel(wolfGroup, lambGroup, LEVEL_ENEMY_CONFIGS[2]);
+    switchItemType('axe');
+  }
+
+  drawProgressBar();
+  console.log('[level] 进入第', index + 1, '关：', LEVEL_NAMES[index]);
 }
 
 // 桌面模式调试用：没有VR手柄没法真实触发"敌人靠近扣命"（第三阶段才有敌人），
@@ -1701,18 +1896,47 @@ function updateTargetShake(dt) {
 // hitPoint为{x,y,dist}表示这一次确实穿过了靶平面（不管有没有落在环内），
 // 为null表示是"落地/超时"兜底判的脱靶，没有真实穿越点可标记。
 function resolveThrow(scoreValue, hitPoint) {
-  console.log('[throw] resolveThrow被调用, scoreValue =', scoreValue, ', hitPoint =', hitPoint, ', itemType =', currentItemType);
-  lastScore = scoreValue;
-  totalScore += scoreValue;
+  console.log('[throw] resolveThrow被调用, scoreValue =', scoreValue, ', hitPoint =', hitPoint, ', itemType =', currentItemType, ', level =', currentLevel);
   throwCount += 1;
   lastHitDistance = hitPoint ? hitPoint.dist : null;
-  if (hitPoint) {
-    // 通用反馈：命中标记点+评级文字，三种物体都有，跟之前完全一样
-    spawnHitMarker(hitPoint.x, hitPoint.y, colorForScore(scoreValue));
-    spawnRatingText(hitPoint.x, hitPoint.y, scoreValue);
 
-    // 差异化反馈：在通用反馈之上叠加各自的效果。飞镖不额外加任何东西，
-    // 保持跟之前完全一样的表现。
+  // 第一关(靶场)：跟之前完全一样，scoreValue就是scoreForDistance()算出来的
+  // 环数分，直接当"这一杆的原始分"用。
+  //
+  // 第二/三关(敌人关卡)：这里的hitPoint仍然是受保护的碰撞检测代码块算出来
+  // 的、飞行物穿过z=TARGET_POS.z平面时的精确坐标——没有另起一套碰撞系统，
+  // 敌人只是巡逻在跟靶同一个z深度上，所以能直接复用这个坐标去跟敌人当前
+  // 位置比距离(tryHitEnemy)。传入的scoreValue(环数分)在这两关没有意义，
+  // 忽略掉，命中与否改由tryHitEnemy的返回值决定，命中给ENEMY_HIT_SCORE
+  // 这个固定分值。
+  let effectiveScore;
+  let hitSomething;
+
+  if (currentLevel === 0) {
+    effectiveScore = scoreValue;
+    hitSomething = !!hitPoint;
+    lastScore = scoreValue;
+    totalScore += scoreValue;
+    if (hitPoint) {
+      spawnHitMarker(hitPoint.x, hitPoint.y, colorForScore(scoreValue));
+      spawnRatingText(hitPoint.x, hitPoint.y, scoreValue);
+    }
+  } else {
+    const enemyHit = hitPoint ? tryHitEnemy(hitPoint.x, hitPoint.y) : false;
+    effectiveScore = enemyHit ? ENEMY_HIT_SCORE : 0;
+    hitSomething = enemyHit;
+    lastScore = effectiveScore;
+    totalScore += effectiveScore;
+    if (enemyHit) {
+      const markerColor = currentItemType === 'tomato' ? '#ff5544' : '#99aabb';
+      spawnHitMarker(hitPoint.x, hitPoint.y, markerColor);
+      spawnRatingText(hitPoint.x, hitPoint.y, ENEMY_HIT_SCORE); // ENEMY_HIT_SCORE=8，复用现成的"GREAT!"评级
+    }
+  }
+
+  // 差异化视觉反馈：只在真的命中了什么(靶环内/敌人)的时候才触发，脱靶
+  // 不触发。飞镖不额外加任何东西，保持跟之前完全一样的表现。
+  if (hitSomething) {
     if (currentItemType === 'tomato') {
       spawnTomatoSplat(hitPoint.x, hitPoint.y);
     } else if (currentItemType === 'axe') {
@@ -1720,8 +1944,7 @@ function resolveThrow(scoreValue, hitPoint) {
     }
   }
 
-  // 音效同样按类型分流；不管命不命中靶面(hitPoint是否为null)都会响，
-  // 保持跟之前"每次投掷都有声音反馈"的行为一致
+  // 音效不管命不命中都会响，保持"每次投掷都有声音反馈"的一致行为
   if (currentItemType === 'tomato') {
     playTomatoHitSound();
   } else if (currentItemType === 'axe') {
@@ -1730,15 +1953,11 @@ function resolveThrow(scoreValue, hitPoint) {
     playHitSound(scoreValue);
   }
 
-  // 关卡计分：第一关(靶场)直接拿环数分当"这一杆的原始分"喂给连击/进度条
-  // 系统。第二/三关(敌人相关的关卡)不会走这条命中靶面的路径，会有自己
-  // 的敌人命中判定，到时候会在那边调用applyScoreAndCombo，不是在这里。
-  if (currentLevel === 0) {
-    applyScoreAndCombo(scoreValue);
-    if (!hasThrownOnce) {
-      hasThrownOnce = true;
-      drawHintText(); // 第一次投掷完成(不管命不命中)，隐藏教学提示
-    }
+  applyScoreAndCombo(effectiveScore);
+
+  if (currentLevel === 0 && !hasThrownOnce) {
+    hasThrownOnce = true;
+    drawHintText(); // 第一次投掷完成(不管命不命中)，隐藏教学提示
   }
 
   resetDartToIdle();
