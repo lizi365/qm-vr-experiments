@@ -49,6 +49,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { createXRExitButton } from '../shared/xrExitButton.js';
 
 // ---------- 基础场景 ----------
 const scene = new THREE.Scene();
@@ -213,6 +214,9 @@ ray0.scale.z = 1.5; ray1.scale.z = 1.5;
 controller0.add(ray0);
 controller1.add(ray1);
 
+// ---------- 场景内退出VR面板（见shared/，三个demo共用同一份逻辑） ----------
+const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
+
 // ---------- 桌面模式：数字键切换档位 ----------
 window.addEventListener('keydown', (e) => {
   const n = parseInt(e.key);
@@ -245,6 +249,8 @@ function animate() {
 
   // 面板始终朝向摄像机（billboard），VR和桌面模式都适用
   panel.quaternion.copy(camera.quaternion);
+
+  exitButton.update();
 
   renderer.render(scene, camera);
 

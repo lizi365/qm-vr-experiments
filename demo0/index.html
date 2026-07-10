@@ -48,6 +48,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { createXRExitButton } from '../shared/xrExitButton.js';
 
 // ---------- 基础场景 ----------
 const scene = new THREE.Scene();
@@ -86,6 +87,15 @@ scene.add(cube);
 // ---------- 地面网格（帮助判断VR里的空间感/追踪是否正常） ----------
 const grid = new THREE.GridHelper(6, 24, 0x2a4a66, 0x152233);
 scene.add(grid);
+
+// ---------- 手柄 + 场景内退出VR面板 ----------
+// VRButton默认的DOM"EXIT VR"按钮进入沉浸模式后不可达，这里换成场景内
+// 3D面板，手柄射线指向+扳机退出，三个demo共用同一份逻辑（见shared/）。
+const controller0 = renderer.xr.getController(0);
+const controller1 = renderer.xr.getController(1);
+scene.add(controller0);
+scene.add(controller1);
+const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
 
 // ---------- 悬浮文字面板（canvas贴图，VR内可读，不依赖DOM） ----------
 const panelCanvas = document.createElement('canvas');
@@ -140,6 +150,8 @@ function animate() {
 
   // 面板始终朝向摄像机（billboard），VR和桌面模式都适用
   panel.quaternion.copy(camera.quaternion);
+
+  exitButton.update();
 
   renderer.render(scene, camera);
 

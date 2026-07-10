@@ -50,6 +50,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { createXRExitButton } from '../shared/xrExitButton.js';
 
 // ---------- 基础场景 ----------
 const scene = new THREE.Scene();
@@ -160,16 +161,22 @@ const dart = buildDart();
 scene.add(dart);
 
 // ---------- 抓取/投掷状态机 ----------
-// 状态：'idle'（悬浮跟随手柄，轻微浮动动画，未锁定）
-//      'held'（扳机按住，刚性跟随手柄，记录位置历史）
+// 状态：'idle'（悬浮在场景固定位置，轻微浮动动画，未锁定）
+//      'held'（抓握键按住，刚性跟随抓取它的那只手，记录位置历史）
 //      'flying'（已投掷，velocity+gravity逐帧积分）
+//
+// 不预设左右手：飞镖闲置时停在场景里一个固定的中性位置（不挂在任何一个
+// controller index上），哪只手先按抓握键触发squeezestart就归哪只手，
+// 松开后飞镖飞出去、计分、再回到中性位置，等下一次任意一只手抓取。
+// 之前这里硬编码成"默认挂在controller0"，在Pico 4 Ultra上controller0
+// 固定对应左手，导致惯用右手的用户抓不到——这是这次要修的第一个问题。
 const STATE = { IDLE: 'idle', HELD: 'held', FLYING: 'flying' };
 let dartState = STATE.IDLE;
 
-let holsterController = null; // 当前"挂着"飞镖的手柄，默认第一个可用的
-let holderController = null;  // held状态下正在抓着飞镖的手柄
+let holderController = null;  // held/flying起点：当前（或刚才）抓着飞镖的手柄
 
-const HOLSTER_OFFSET = new THREE.Vector3(0.03, -0.02, -0.08); // 飞镖相对手柄的悬浮偏移
+const IDLE_POS = new THREE.Vector3(0, 1.3, -0.35); // 中性待抓取位置，双手都够得着
+const GRAB_OFFSET = new THREE.Vector3(0.03, -0.02, -0.08); // 抓住后飞镖相对手柄的偏移
 const HISTORY_LEN = 8; // 滑动窗口帧数，用于释放瞬间的速度计算
 let posHistory = []; // { p: Vector3, t: number(ms) }
 
@@ -182,20 +189,20 @@ let totalScore = 0;
 let throwCount = 0;
 let lastScore = 0;
 let lastThrowSpeed = 0;
+let lastHitDistance = null; // 命中点距靶心的原始距离（米），null表示没有穿过靶平面
 
-function resetDartToHolster(controller) {
-  holsterController = controller;
+function resetDartToIdle() {
   dartState = STATE.IDLE;
+  holderController = null;
   dartVelocity.set(0, 0, 0);
   posHistory = [];
 }
 
 function attachControllerEvents(controller) {
   controller.addEventListener('squeezestart', () => {
-    // 只有靶飞镖当前挂在这只手（或者飞镖正闲置未指定手）时，这只手才能抓取，
-    // 避免两只手同时抓到同一支飞镖导致状态冲突
+    // 谁先按谁抓——不检查是哪只手，只检查飞镖当前是不是闲置状态，
+    // 这样已经有一支飞镖在飞/被抓着的时候，另一只手按了也不会抢过来。
     if (dartState !== STATE.IDLE) return;
-    if (holsterController && holsterController !== controller) return;
 
     dartState = STATE.HELD;
     holderController = controller;
@@ -234,20 +241,25 @@ const controller1 = renderer.xr.getController(1);
 attachControllerEvents(controller0);
 attachControllerEvents(controller1);
 
+// ---------- 场景内退出VR面板（见shared/，三个demo共用同一份逻辑） ----------
+const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
+
 const tmpControllerPos = new THREE.Vector3();
 const tmpControllerQuat = new THREE.Quaternion();
 const tmpOffset = new THREE.Vector3();
 
 // ---------- 悬浮记分面板（跟Demo 1同样的视觉方案：深色圆角背景 + 青色文字） ----------
+// 加高了一点（260→300px），多塞下一行"本次命中距靶心距离"的原始数值，
+// 这是这次新加的命中诊断信息，配合下面的命中标记点一起用来验证碰撞检测。
 const panelCanvas = document.createElement('canvas');
 panelCanvas.width = 512;
-panelCanvas.height = 260;
+panelCanvas.height = 300;
 const panelCtx = panelCanvas.getContext('2d');
 const panelTexture = new THREE.CanvasTexture(panelCanvas);
 const panelMat = new THREE.MeshBasicMaterial({
   map: panelTexture, transparent: true, depthTest: false,
 });
-const panelGeo = new THREE.PlaneGeometry(0.55, 0.28);
+const panelGeo = new THREE.PlaneGeometry(0.55, 0.322);
 const panel = new THREE.Mesh(panelGeo, panelMat);
 panel.position.set(0, 2.35, -2.5);
 panel.renderOrder = 999;
@@ -255,44 +267,99 @@ scene.add(panel);
 
 function drawPanel(fps) {
   const ctx = panelCtx;
-  ctx.clearRect(0, 0, 512, 260);
+  ctx.clearRect(0, 0, 512, 300);
   ctx.fillStyle = 'rgba(5, 10, 20, 0.75)';
-  ctx.roundRect(0, 0, 512, 260, 16);
+  ctx.roundRect(0, 0, 512, 300, 16);
   ctx.fill();
 
   ctx.textAlign = 'center';
 
   ctx.fillStyle = '#7fd4ff';
   ctx.font = 'bold 34px sans-serif';
-  ctx.fillText(`本次得分: ${lastScore}`, 256, 56);
+  ctx.fillText(`本次得分: ${lastScore}`, 256, 50);
+
+  ctx.font = 'bold 28px sans-serif';
+  ctx.fillStyle = '#cfe8ff';
+  ctx.fillText(`累计得分: ${totalScore}   已投掷: ${throwCount}`, 256, 90);
+
+  ctx.font = '24px sans-serif';
+  ctx.fillStyle = '#9db4cc';
+  ctx.fillText(`上次初速度: ${lastThrowSpeed.toFixed(2)} m/s`, 256, 128);
+
+  // 原始距离数值，不做换算美化，方便跟视觉标记点位对照，验证环数划分是否合理
+  const distText = lastHitDistance === null
+    ? '上次命中距靶心: 未穿越靶面'
+    : `上次命中距靶心: ${lastHitDistance.toFixed(3)} m`;
+  ctx.font = '24px sans-serif';
+  ctx.fillStyle = '#9db4cc';
+  ctx.fillText(distText, 256, 164);
 
   ctx.font = 'bold 30px sans-serif';
-  ctx.fillStyle = '#cfe8ff';
-  ctx.fillText(`累计得分: ${totalScore}   已投掷: ${throwCount}`, 256, 100);
-
-  ctx.font = '26px sans-serif';
-  ctx.fillStyle = '#9db4cc';
-  ctx.fillText(`上次初速度: ${lastThrowSpeed.toFixed(2)} m/s`, 256, 148);
-
-  ctx.font = 'bold 32px sans-serif';
   ctx.fillStyle = fps >= 80 ? '#7fffb0' : fps >= 60 ? '#ffe27f' : '#ff9f7f';
-  ctx.fillText(`FPS: ${fps}`, 256, 200);
+  ctx.fillText(`FPS: ${fps}`, 256, 212);
 
   const stateLabel = { idle: '待抓取', held: '抓取中…', flying: '飞行中…' }[dartState];
   ctx.font = '22px sans-serif';
   ctx.fillStyle = '#6a8aa8';
-  ctx.fillText(stateLabel, 256, 238);
+  ctx.fillText(stateLabel, 256, 254);
 
   panelTexture.needsUpdate = true;
 }
 
+// ---------- 命中标记：飞镖穿越靶平面的精确碰撞点，短暂显示一个亮色小球 ----------
+// 目的是让"环数怎么算出来的"这件事可以被肉眼验证——标记点跟视觉上感觉
+// 命中的位置对不上，就说明是碰撞检测算错了，而不是主观空间感知有偏差。
+const HIT_MARKER_LIFETIME = 2000; // ms，每个标记停留多久
+const HIT_MARKER_MAX = 3; // 最多同时保留几个，超过就把最老的立刻收掉
+const hitMarkers = []; // { mesh, createdAt }
+const hitMarkerGeo = new THREE.SphereGeometry(0.018, 12, 12);
+
+function spawnHitMarker(x, y, color) {
+  const mat = new THREE.MeshBasicMaterial({ color, transparent: true });
+  const mesh = new THREE.Mesh(hitMarkerGeo, mat);
+  mesh.position.set(x, y, TARGET_POS.z + 0.006); // 稍微往摄像机方向偏一点，避免跟靶面贴图z-fighting
+  scene.add(mesh);
+  hitMarkers.push({ mesh, createdAt: performance.now() });
+
+  while (hitMarkers.length > HIT_MARKER_MAX) {
+    const old = hitMarkers.shift();
+    scene.remove(old.mesh);
+    old.mesh.material.dispose(); // geometry是共享的hitMarkerGeo，不dispose
+  }
+}
+
+function updateHitMarkers(now) {
+  for (let i = hitMarkers.length - 1; i >= 0; i--) {
+    const m = hitMarkers[i];
+    const age = now - m.createdAt;
+    if (age > HIT_MARKER_LIFETIME) {
+      scene.remove(m.mesh);
+      m.mesh.material.dispose();
+      hitMarkers.splice(i, 1);
+    } else {
+      // 快到寿命尽头时淡出，而不是直接消失，观感更柔和
+      m.mesh.material.opacity = Math.min(1, (HIT_MARKER_LIFETIME - age) / 400);
+    }
+  }
+}
+
+function colorForScore(scoreValue) {
+  const ring = RINGS.find((r) => r.score === scoreValue);
+  return ring ? ring.color : '#666666'; // 脱靶(0分)用灰色标记，跟计分环颜色区分开
+}
+
 // ---------- 命中判定：飞镖飞行过程中，每帧检测是否穿过靶所在的平面 ----------
-function resolveThrow(scoreValue) {
+// hitPoint为{x,y,dist}表示这一次确实穿过了靶平面（不管有没有落在环内），
+// 为null表示是"落地/超时"兜底判的脱靶，没有真实穿越点可标记。
+function resolveThrow(scoreValue, hitPoint) {
   lastScore = scoreValue;
   totalScore += scoreValue;
   throwCount += 1;
-  // 飞镖回到默认挂载手（优先回到上一次投掷的那只手，没有就随便挑一个已连接的手柄）
-  resetDartToHolster(holsterController || controller0);
+  lastHitDistance = hitPoint ? hitPoint.dist : null;
+  if (hitPoint) {
+    spawnHitMarker(hitPoint.x, hitPoint.y, colorForScore(scoreValue));
+  }
+  resetDartToIdle();
 }
 
 const prevDartPos = new THREE.Vector3();
@@ -324,13 +391,14 @@ function updateFlying(dt) {
     const hitX = prevDartPos.x + (newDartPos.x - prevDartPos.x) * t;
     const hitY = prevDartPos.y + (newDartPos.y - prevDartPos.y) * t;
     const dist = Math.hypot(hitX - TARGET_POS.x, hitY - TARGET_POS.y);
-    resolveThrow(scoreForDistance(dist));
+    resolveThrow(scoreForDistance(dist), { x: hitX, y: hitY, dist });
     return;
   }
 
   // ---- 兜底：落地或超时都算脱靶，避免飞镖飞出视野后状态机卡死 ----
+  // 这种情况飞镖根本没穿过靶平面，没有真实碰撞点可标记，distance显示"未穿越靶面"
   if (dart.position.y <= 0 || flightTime > MAX_FLIGHT_TIME) {
-    resolveThrow(0);
+    resolveThrow(0, null);
   }
 }
 
@@ -362,34 +430,31 @@ function animate() {
     dart.rotation.set(0, Math.PI * 0.15, 0);
   } else if (dartState === STATE.FLYING) {
     updateFlying(dt);
+  } else if (dartState === STATE.HELD) {
+    // held：刚性跟随抓着它的那只手（不预设是哪只，谁抓的就跟谁）
+    holderController.getWorldPosition(tmpControllerPos);
+    holderController.getWorldQuaternion(tmpControllerQuat);
+    tmpOffset.copy(GRAB_OFFSET).applyQuaternion(tmpControllerQuat);
+
+    dart.position.copy(tmpControllerPos).add(tmpOffset);
+    dart.quaternion.copy(tmpControllerQuat);
+
+    posHistory.push({ p: dart.position.clone(), t: now });
+    if (posHistory.length > HISTORY_LEN) posHistory.shift();
   } else {
-    // idle 或 held：飞镖跟随手柄（held是刚性跟随，idle是带一点漂浮感的跟随）
-    const controller = dartState === STATE.HELD ? holderController : holsterController;
-    if (controller) {
-      controller.getWorldPosition(tmpControllerPos);
-      controller.getWorldQuaternion(tmpControllerQuat);
-      tmpOffset.copy(HOLSTER_OFFSET).applyQuaternion(tmpControllerQuat);
-
-      if (dartState === STATE.IDLE) {
-        idleBob += dt * 2.2;
-        tmpOffset.y += Math.sin(idleBob) * 0.008; // 轻微上下浮动，暗示"还没抓稳"
-      }
-
-      dart.position.copy(tmpControllerPos).add(tmpOffset);
-      dart.quaternion.copy(tmpControllerQuat);
-
-      if (dartState === STATE.HELD) {
-        posHistory.push({ p: dart.position.clone(), t: now });
-        if (posHistory.length > HISTORY_LEN) posHistory.shift();
-      }
-    } else if (!holsterController) {
-      // 还没有任何手柄连接过（比如XR会话刚开始的第一帧），先挂在controller0上
-      resetDartToHolster(controller0);
-    }
+    // idle：停在场景中性位置，带一点轻微浮动，暗示"还没抓稳"，
+    // 不跟随任何手柄，双手都能伸过来抓取
+    idleBob += dt * 2.2;
+    dart.position.set(IDLE_POS.x, IDLE_POS.y + Math.sin(idleBob) * 0.01, IDLE_POS.z);
+    dart.quaternion.identity();
   }
+
+  updateHitMarkers(now);
 
   // 面板始终朝向摄像机（billboard）
   panel.quaternion.copy(camera.quaternion);
+
+  exitButton.update();
 
   renderer.render(scene, camera);
 

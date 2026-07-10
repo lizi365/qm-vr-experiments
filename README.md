@@ -23,6 +23,8 @@
 qm-vr-experiments/
 ├── index.html          ← 根导航页，列出所有demo链接
 ├── README.md            ← 本文件
+├── shared/
+│   └── xrExitButton.js ← 场景内3D退出VR面板，三个demo共用（见下方说明）
 ├── demo0/
 │   ├── index.html      ← 链路验证：WebXR旋转立方体
 │   └── README.md
@@ -34,7 +36,7 @@ qm-vr-experiments/
     └── README.md
 ```
 
-每个demo都是完全独立的单文件 `index.html`，互不依赖，可以单独打开、单独部署。
+每个demo的 `index.html` 都是独立可用的，互不依赖对方的demo文件，可以单独打开、单独部署。`shared/xrExitButton.js` 是三个demo都会import的一个小模块（不是demo，是被复用的组件），仍然是纯ES module + 相对路径引用，不涉及npm构建。
 
 ## 部署到 Cloudflare Pages（步骤）
 
@@ -62,3 +64,4 @@ Demo 1 的README里有一张FPS实测记录表，等实机测试数据（500/2,0
 - Three.js 通过 importmap 从 `unpkg.com` CDN 加载，不引入本地 npm 构建流程，保持纯静态HTML零构建部署。
 - 代码注释中英混合可以，面向用户的README统一用中文。
 - 每个demo保留FPS实时显示：桌面模式DOM显示（右上角） + VR模式头显内悬浮面板（canvas贴图billboard），双通道，方便每一版做性能对比。
+- 每个demo都要接入 `shared/xrExitButton.js` 提供场景内退出VR面板——VRButton默认生成的DOM"EXIT VR"按钮在沉浸模式里不可达，这是2026-07-10真机测试暴露出来的问题，三个demo一起修的（详见Demo Dart的README）。
