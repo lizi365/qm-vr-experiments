@@ -31,11 +31,11 @@
 <body>
 
 <div id="info">
-  <b>Demo Dart · 抓取投掷交互测试</b><br/>
+  <b>Demo Dart · 三关小游戏（开发中，目前第一关框架已接通）</b><br/>
   VR模式：按住手柄<b>扳机键(trigger)</b>抓住投掷物，甩动手柄后松开投掷<br/>
   左下方面板用<b>抓握键</b>切换飞镖/番茄/斧头，右下方面板<b>抓握键</b>退出VR<br/>
-  靶心10分，往外依次 8 / 6 / 4 / 2 分，脱靶0分<br/>
-  <span class="warn">桌面模式仅供预览，无法模拟抓取投掷手感</span>
+  视野上方是生命值(❤)和关卡进度条，靶心10分往外依次8/6/4/2分，连续命中6分以上有连击加成<br/>
+  <span class="warn">桌面模式仅供预览，无法模拟抓取投掷手感；按L键可调试性地扣一条命</span>
 </div>
 <div id="stats">FPS: --</div>
 
@@ -753,7 +753,13 @@ function attachControllerEvents(controller, idx) {
   // 原生事件：兜底路径，万一模拟量拿不到，至少这条还能用。trigger对应的
   // WebXR标准事件名是select/selectstart/selectend（这是规范定义的固定
   // 名字，不是设备相关的东西，不需要像按钮索引那样实测确认）。
-  controller.addEventListener('selectstart', () => grabDart(controller));
+  // 2026-07-11新增：gameOverActive时扳机键改成触发重开，不再走抓取——
+  // gameOverActive/restartLevel是本文件后面"小游戏框架"那段加的，这里只是
+  // 新增一个前置判断分支，grabDart()本身一个字没动。
+  controller.addEventListener('selectstart', () => {
+    if (gameOverActive) { restartLevel(); return; }
+    grabDart(controller);
+  });
   controller.addEventListener('selectend', () => releaseDart(controller));
   scene.add(controller);
 }
@@ -767,6 +773,12 @@ attachControllerEvents(controller1, 1);
 function updateAnalogGrabInput() {
   logGamepadButtonChanges(0);
   logGamepadButtonChanges(1);
+
+  // gameOverActive时不做抓取相关的模拟量判定——重开走的是原生selectstart
+  // 事件的边沿触发（见attachControllerEvents），这里如果也跟着触发，
+  // 因为是每帧轮询、扳机按住不放的话会每帧都调一次restartLevel()，
+  // 不干净，所以直接跳过，交给边沿触发的那条路径处理。
+  if (gameOverActive) return;
 
   let hint = false;
   const controllers = [controller0, controller1];
@@ -909,6 +921,292 @@ function updateItemSelectPanel() {
     pendingItemSqueeze = [];
   }
 }
+
+// ========== 小游戏框架：生命值/连击计分/进度条/过关失败反馈 ==========
+// 2026-07-11 第五轮：从"单一靶场测试"升级成三关小游戏，红白机式设计
+// （目标清晰、失败成本低、难度曲线诚实）。这一大段是跟具体关卡内容无关
+// 的通用框架，先在第一关（复用现有靶场）上跑通验证，后续阶段再接第二/
+// 三关。全程不修改7个受保护的物理常量和碰撞检测代码块，只在resolveThrow/
+// animate()这些下游消费者里新增分支逻辑。
+
+// ---------- 关卡配置 ----------
+// 阈值先给出一版合理估计，具体数值会写进README，方便后续实测后调整平衡性
+const LEVEL_NAMES = ['飞镖打靶', '番茄护兔', '斧子救羊'];
+const LEVEL_THRESHOLDS = [300, 500, 800]; // 第一关最低，逐关递增
+let currentLevel = 0;
+
+// ---------- 生命值 ----------
+const MAX_LIVES = 3;
+let lives = MAX_LIVES;
+let gameOverActive = false; // true时，扳机不再触发抓取，改成触发重开
+
+const heartsCanvas = document.createElement('canvas');
+heartsCanvas.width = 300;
+heartsCanvas.height = 100;
+const heartsCtx = heartsCanvas.getContext('2d');
+const heartsTexture = new THREE.CanvasTexture(heartsCanvas);
+const heartsMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.24, 0.08),
+  new THREE.MeshBasicMaterial({ map: heartsTexture, transparent: true, depthTest: false })
+);
+heartsMesh.position.set(-0.34, 0.30, -0.55); // 视野左上角，固定挂在camera下
+heartsMesh.renderOrder = 999;
+camera.add(heartsMesh);
+
+// 用贝塞尔曲线画一个简单的心形，不依赖emoji字体渲染（不同头显/浏览器对
+// emoji字体的支持不一致，自己画的形状更可控）
+function drawHeartShape(ctx, cx, cy, size, filled) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.beginPath();
+  ctx.moveTo(0, size * 0.32);
+  ctx.bezierCurveTo(-size * 0.5, -size * 0.28, -size, size * 0.12, 0, size * 0.85);
+  ctx.bezierCurveTo(size, size * 0.12, size * 0.5, -size * 0.28, 0, size * 0.32);
+  ctx.closePath();
+  ctx.fillStyle = filled ? '#ff4a5a' : 'rgba(70,20,24,0.5)';
+  ctx.fill();
+  ctx.strokeStyle = filled ? '#ffc4c9' : '#4a2a2c';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHeartsHUD() {
+  heartsCtx.clearRect(0, 0, heartsCanvas.width, heartsCanvas.height);
+  const size = 34;
+  const gap = 46;
+  const startX = 40;
+  for (let i = 0; i < MAX_LIVES; i++) {
+    drawHeartShape(heartsCtx, startX + i * gap, 50, size, i < lives);
+  }
+  heartsTexture.needsUpdate = true;
+}
+drawHeartsHUD();
+
+// ---------- 连击倍率 + 进度条 ----------
+// 连续命中环数>=6分时倍率递增：1.0(第1次达标) -> 1.2(第2次) -> 1.5(第3次)
+// -> 2.0(第4次及以上)，脱靶或环数<6直接清零重置。具体数值在README说明，
+// 方便后续调整平衡性。
+const COMBO_TABLE = [1.0, 1.2, 1.5, 2.0];
+const COMBO_QUALIFY_SCORE = 6;
+let comboStreak = 0;
+let comboMultiplier = 1.0;
+let levelScore = 0;
+
+const progressCanvas = document.createElement('canvas');
+progressCanvas.width = 512;
+progressCanvas.height = 140;
+const progressCtx = progressCanvas.getContext('2d');
+const progressTexture = new THREE.CanvasTexture(progressCanvas);
+const progressMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.5, 0.137),
+  new THREE.MeshBasicMaterial({ map: progressTexture, transparent: true, depthTest: false })
+);
+progressMesh.position.set(0, 0.34, -0.55); // 视野正上方，跟心形HUD分开，避免拥挤
+progressMesh.renderOrder = 999;
+camera.add(progressMesh);
+
+function drawProgressBar() {
+  const ctx = progressCtx;
+  ctx.clearRect(0, 0, 512, 140);
+  ctx.fillStyle = 'rgba(5, 10, 20, 0.75)';
+  ctx.roundRect(0, 0, 512, 140, 14);
+  ctx.fill();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#cfe8ff';
+  ctx.font = 'bold 26px sans-serif';
+  ctx.fillText(`第${currentLevel + 1}关 · ${LEVEL_NAMES[currentLevel]}`, 256, 34);
+
+  const threshold = LEVEL_THRESHOLDS[currentLevel];
+  const pct = Math.max(0, Math.min(levelScore / threshold, 1));
+  const barX = 30, barY = 55, barW = 452, barH = 34;
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.beginPath();
+  ctx.roundRect(barX, barY, barW, barH, 8);
+  ctx.fill();
+  ctx.fillStyle = pct >= 1 ? '#7fffb0' : '#7fd4ff';
+  ctx.beginPath();
+  ctx.roundRect(barX, barY, barW * pct, barH, 8);
+  ctx.fill();
+
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillStyle = '#0a1420';
+  ctx.fillText(`${levelScore} / ${threshold}`, barX + barW / 2, barY + barH / 2 + 6);
+
+  if (comboMultiplier > 1) {
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillStyle = '#ffe27f';
+    ctx.fillText(`连击 x${comboMultiplier.toFixed(1)}`, 256, 122);
+  }
+
+  progressTexture.needsUpdate = true;
+}
+drawProgressBar();
+
+// ---------- 过关/失败的全屏闪光反馈 ----------
+// 挂在camera正前方很近的位置、够大充满视野的一块半透明Plane，
+// depthTest关掉保证不管场景里有什么都盖得住
+const flashMat = new THREE.MeshBasicMaterial({
+  color: 0xffffff, transparent: true, opacity: 0, depthTest: false, depthWrite: false,
+});
+const flashMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), flashMat);
+flashMesh.position.set(0, 0, -0.28);
+flashMesh.renderOrder = 2000;
+camera.add(flashMesh);
+
+let flashState = null; // { color, startTime, duration }
+function triggerFlash(colorHex, duration = 400) {
+  flashState = { color: colorHex, startTime: performance.now(), duration };
+}
+function updateFlash(now) {
+  if (!flashState) {
+    flashMat.opacity = 0;
+    return;
+  }
+  const age = now - flashState.startTime;
+  if (age >= flashState.duration) {
+    flashState = null;
+    flashMat.opacity = 0;
+    return;
+  }
+  const t = age / flashState.duration;
+  // 前20%快速淡入到峰值，剩余80%淡出，比线性淡入淡出更有"闪"的冲击感
+  const opacity = t < 0.2 ? (t / 0.2) * 0.6 : 0.6 * (1 - (t - 0.2) / 0.8);
+  flashMat.color.set(flashState.color);
+  flashMat.opacity = opacity;
+}
+
+// ---------- 过关音效：8-bit风格的上扬音阶 ----------
+function playLevelCompleteSound() {
+  const notes = [523, 659, 784, 988, 1175]; // C5-E5-G5-B5-D6，简单大调琶音上行
+  notes.forEach((freq, i) => {
+    setTimeout(() => playTone({ freq, duration: 0.12, type: 'square', gain: 0.22 }), i * 70);
+  });
+}
+
+// ---------- 扣命音效：低沉下行 ----------
+function playLoseLifeSound() {
+  playTone({ freq: 220, freqEnd: 100, duration: 0.3, type: 'sawtooth', gain: 0.26 });
+}
+
+// ---------- "再来一次"提示面板：只在gameOverActive时可见 ----------
+const gameOverCanvas = document.createElement('canvas');
+gameOverCanvas.width = 512;
+gameOverCanvas.height = 220;
+const gameOverCtx = gameOverCanvas.getContext('2d');
+const gameOverTexture = new THREE.CanvasTexture(gameOverCanvas);
+const gameOverMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.55, 0.236),
+  new THREE.MeshBasicMaterial({ map: gameOverTexture, transparent: true, depthTest: false })
+);
+gameOverMesh.position.set(0, 0, -0.6);
+gameOverMesh.renderOrder = 1999;
+gameOverMesh.visible = false;
+camera.add(gameOverMesh);
+
+function drawGameOverPanel() {
+  const ctx = gameOverCtx;
+  ctx.clearRect(0, 0, 512, 220);
+  ctx.fillStyle = 'rgba(20, 5, 5, 0.85)';
+  ctx.roundRect(0, 0, 512, 220, 18);
+  ctx.fill();
+  ctx.strokeStyle = '#ff6a6a';
+  ctx.lineWidth = 4;
+  ctx.roundRect(4, 4, 504, 212, 16);
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffb3ba';
+  ctx.font = 'bold 42px sans-serif';
+  ctx.fillText('生命耗尽', 256, 90);
+  ctx.font = '24px sans-serif';
+  ctx.fillStyle = '#cfe8ff';
+  ctx.fillText('按扳机键再来一次', 256, 145);
+
+  gameOverTexture.needsUpdate = true;
+}
+
+// ---------- 得分/连击/进度条/过关判定：包在resolveThrow外层的一个函数 ----------
+// rawScore是"这一杆的原始分"：第一关是scoreForDistance()算出来的环数分，
+// 第二/三关(阶段4实现)会是"命中敌人=固定分/没命中=0"。这个函数本身不
+// 关心rawScore具体怎么来的，只负责连击倍率+累计进度+过关判定，所以三关
+// 都能直接复用，不用各自重写一遍。
+function applyScoreAndCombo(rawScore) {
+  if (rawScore >= COMBO_QUALIFY_SCORE) {
+    comboStreak += 1;
+  } else {
+    comboStreak = 0;
+  }
+  comboMultiplier = comboStreak === 0 ? 1.0 : COMBO_TABLE[Math.min(comboStreak - 1, COMBO_TABLE.length - 1)];
+
+  const finalScore = Math.round(rawScore * comboMultiplier);
+  levelScore += finalScore;
+  drawProgressBar();
+
+  console.log('[level] rawScore=', rawScore, ' combo x', comboMultiplier, ' finalScore=', finalScore, ' levelScore=', levelScore, '/', LEVEL_THRESHOLDS[currentLevel]);
+
+  if (levelScore >= LEVEL_THRESHOLDS[currentLevel]) {
+    onLevelComplete();
+  }
+  return finalScore;
+}
+
+function onLevelComplete() {
+  triggerFlash(0xffffff, 450);
+  playLevelCompleteSound();
+  console.log('[level] 第', currentLevel + 1, '关完成！');
+  // TODO(阶段5)：这里要接关卡切换转场——擦除式Plane扫过画面，隐藏当前关卡
+  // 物体、加载下一关物体、currentLevel+1、levelScore/comboStreak清零。
+  // 现在只做即时反馈(闪光+音效)，还没有真的"进入下一关"，第一关打完之后
+  // 目前会停在同一个场景，进度条会一直显示"已通关"状态，这是阶段1的
+  // 已知限制，不是bug。
+}
+
+function loseLife() {
+  lives = Math.max(0, lives - 1);
+  triggerFlash(0xff2a2a, 350);
+  playLoseLifeSound();
+  drawHeartsHUD();
+  console.log('[life] 扣命，剩余', lives);
+  if (lives <= 0) {
+    onGameOver();
+  }
+}
+
+function onGameOver() {
+  gameOverActive = true;
+  drawGameOverPanel();
+  gameOverMesh.visible = true;
+  console.log('[life] 生命耗尽，等待重开');
+}
+
+// 重开当前关卡：只重置状态，不刷新整个页面
+function restartLevel() {
+  lives = MAX_LIVES;
+  levelScore = 0;
+  comboStreak = 0;
+  comboMultiplier = 1.0;
+  gameOverActive = false;
+  gameOverMesh.visible = false;
+  drawHeartsHUD();
+  drawProgressBar();
+  resetDartToIdle();
+  console.log('[level] 重开第', currentLevel + 1, '关');
+}
+
+// 桌面模式调试用：没有VR手柄没法真实触发"敌人靠近扣命"（第三阶段才有敌人），
+// 按L键手动模拟扣一条命，方便在没有头显的情况下也能验证生命值/闪光/
+// 重开这一整条流程能不能跑通。只在桌面模式下生效，不影响VR体验。
+window.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 'l' && !renderer.xr.isPresenting) {
+    if (gameOverActive) {
+      restartLevel();
+    } else {
+      loseLife();
+    }
+  }
+});
 
 const tmpControllerPos = new THREE.Vector3();
 const tmpControllerQuat = new THREE.Quaternion();
@@ -1140,6 +1438,13 @@ function resolveThrow(scoreValue, hitPoint) {
     playHitSound(scoreValue);
   }
 
+  // 关卡计分：第一关(靶场)直接拿环数分当"这一杆的原始分"喂给连击/进度条
+  // 系统。第二/三关(敌人相关的关卡)不会走这条命中靶面的路径，会有自己
+  // 的敌人命中判定，到时候会在那边调用applyScoreAndCombo，不是在这里。
+  if (currentLevel === 0) {
+    applyScoreAndCombo(scoreValue);
+  }
+
   resetDartToIdle();
 }
 
@@ -1261,6 +1566,7 @@ function animate() {
   updateSparks(dt); // 不管在不在飞行，已经存在的火星粒子都要继续衰减/淡出
   updateSplatEffects(dt);
   updateTargetShake(dt);
+  updateFlash(now);
 
   // 面板始终朝向摄像机（billboard）
   panel.quaternion.copy(camera.quaternion);
