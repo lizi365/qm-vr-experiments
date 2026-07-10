@@ -32,8 +32,8 @@
 
 <div id="info">
   <b>Demo Dart · 抓取投掷交互测试</b><br/>
-  VR模式：按住手柄<b>扳机键(trigger)</b>抓住飞镖，甩动手柄后松开投掷<br/>
-  退出VR用<b>抓握键(squeeze/grip)</b>指向右下方面板<br/>
+  VR模式：按住手柄<b>扳机键(trigger)</b>抓住投掷物，甩动手柄后松开投掷<br/>
+  左下方面板用<b>抓握键</b>切换飞镖/番茄/斧头，右下方面板<b>抓握键</b>退出VR<br/>
   靶心10分，往外依次 8 / 6 / 4 / 2 分，脱靶0分<br/>
   <span class="warn">桌面模式仅供预览，无法模拟抓取投掷手感</span>
 </div>
@@ -53,10 +53,14 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { createXRExitButton } from '../shared/xrExitButton.js';
 
-// ---------- 基础场景 ----------
+// ---------- 基础场景：昏暗森林氛围 ----------
+// 2026-07-10场景改造：从深空蓝黑改成深绿偏黑的森林氛围，雾色跟背景色
+// 一致，营造视线受限的林间纵深感。这一段只改颜色/光照/地面/装饰物，
+// 不碰下面的抓取/投掷/碰撞检测逻辑。
+const FOREST_BG = 0x070a06;
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x05070c);
-scene.fog = new THREE.Fog(0x05070c, 3, 14);
+scene.background = new THREE.Color(FOREST_BG);
+scene.fog = new THREE.Fog(FOREST_BG, 2, 9); // 比之前(3,14)更近更浓，视线受限的森林感
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
 camera.position.set(0, 1.6, 2.2);
@@ -69,14 +73,78 @@ document.body.appendChild(renderer.domElement);
 const vrButton = VRButton.createButton(renderer);
 document.body.appendChild(vrButton);
 
-const ambient = new THREE.AmbientLight(0x445577, 0.6);
+// 灯光从冷色调科幻蓝(0x445577/0x7fd4ff)换成偏暗的林间绿+透过树冠的暖黄，
+// 强度也调低，配合浓雾维持"昏暗"的基调
+const ambient = new THREE.AmbientLight(0x2a3a26, 0.55);
 scene.add(ambient);
-const point = new THREE.PointLight(0x7fd4ff, 2.5, 12);
-point.position.set(1, 2.5, 0);
+const point = new THREE.PointLight(0xffcf8a, 1.8, 10);
+point.position.set(1, 3, -0.5); // 挪高一点，模拟从树冠缝隙洒下来的光
 scene.add(point);
 
-const grid = new THREE.GridHelper(6, 24, 0x2a4a66, 0x152233);
-scene.add(grid);
+// ---------- 森林地面：程序化Canvas噪声贴图，深褐/深绿斑驳落叶苔藓质感 ----------
+// 不追求真实感，用随机色块+颗粒噪点堆出"斑驳"的印象即可
+const groundCanvas = document.createElement('canvas');
+groundCanvas.width = 512;
+groundCanvas.height = 512;
+const gctx = groundCanvas.getContext('2d');
+gctx.fillStyle = '#1c150e'; // 基底：深褐土色
+gctx.fillRect(0, 0, 512, 512);
+// 大块的深绿苔藓斑块
+for (let i = 0; i < 40; i++) {
+  gctx.fillStyle = `rgba(${20 + Math.random()*20}, ${40 + Math.random()*30}, ${15 + Math.random()*15}, ${0.3 + Math.random()*0.4})`;
+  const r = 20 + Math.random() * 60;
+  gctx.beginPath();
+  gctx.arc(Math.random() * 512, Math.random() * 512, r, 0, Math.PI * 2);
+  gctx.fill();
+}
+// 细小的落叶颗粒噪点
+for (let i = 0; i < 900; i++) {
+  const shade = Math.random();
+  gctx.fillStyle = shade > 0.5
+    ? `rgba(${60 + Math.random()*40}, ${35 + Math.random()*20}, ${10 + Math.random()*10}, 0.6)`
+    : `rgba(${15 + Math.random()*15}, ${25 + Math.random()*15}, ${10 + Math.random()*10}, 0.6)`;
+  gctx.fillRect(Math.random() * 512, Math.random() * 512, 2 + Math.random() * 3, 2 + Math.random() * 3);
+}
+const groundTexture = new THREE.CanvasTexture(groundCanvas);
+groundTexture.wrapS = THREE.RepeatWrapping;
+groundTexture.wrapT = THREE.RepeatWrapping;
+groundTexture.repeat.set(4, 4); // 平铺几次，避免地面太大时看出贴图重复的单调感太明显
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(20, 20),
+  new THREE.MeshStandardMaterial({ map: groundTexture, roughness: 0.95, metalness: 0 })
+);
+ground.rotation.x = -Math.PI / 2; // Plane默认竖直，转平铺地
+scene.add(ground);
+
+// ---------- 树干剪影：简化圆柱(树干)+圆锥(树冠)，只做空间氛围暗示 ----------
+// 位置刻意避开靶(z=-2.5附近)和飞行轨迹(大致沿x=0走廊)，放在两侧和更远处，
+// 数量控制在5棵，几何体segment数很低，对帧率基本没有影响
+function buildTree(x, z, scale) {
+  const group = new THREE.Group();
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 1 });
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 1.6, 6), trunkMat);
+  trunk.position.y = 0.8;
+  group.add(trunk);
+
+  const canopyMat = new THREE.MeshStandardMaterial({ color: 0x0f1a0d, roughness: 1 });
+  for (let i = 0; i < 3; i++) {
+    const canopy = new THREE.Mesh(new THREE.ConeGeometry(0.9 - i * 0.18, 1.1, 7), canopyMat);
+    canopy.position.y = 1.6 + i * 0.7;
+    group.add(canopy);
+  }
+
+  group.position.set(x, 0, z);
+  group.scale.setScalar(scale);
+  return group;
+}
+const TREE_LAYOUT = [
+  [-2.6, -1.5, 1.1], [2.8, -2.0, 1.3], [-3.2, -4.0, 1.5],
+  [3.4, -4.5, 1.2], [-1.8, -6.0, 1.6],
+];
+for (const [x, z, s] of TREE_LAYOUT) {
+  scene.add(buildTree(x, z, s));
+}
 
 // ---------- 飞镖靶：Canvas贴图画同心圆环，贴在一个Plane上 ----------
 const TARGET_POS = new THREE.Vector3(0, 1.5, -2.5);
@@ -135,12 +203,15 @@ const backboard = new THREE.Mesh(
 backboard.position.copy(TARGET_POS).add(new THREE.Vector3(0, 0, -0.02));
 scene.add(backboard);
 
-// ---------- 飞镖模型：圆锥(镖尖) + 圆柱(镖身)，本地-Z方向为"前进方向" ----------
-// shaftMat拿到外层作用域，是因为下面"预抓取发光提示"需要在抓取阈值前
-// 动态调它的emissiveIntensity，做一个呼吸感的高亮。
-const BASE_SHAFT_EMISSIVE = 0.3;
-let shaftMat;
+// ---------- 三种可选投掷物：飞镖(保留原样)/番茄/斧头 ----------
+// 每个build函数返回 { group, hintMat }：group是Object3D，hintMat是"预抓取
+// 发光提示"要调emissiveIntensity的那个材质。抓取判定/速度计算/碰撞检测
+// 完全不关心具体是哪种物体——那些代码只操作外层的`dart`变量（当前生效的
+// Object3D引用）和`currentHintMat`，不需要知道也不需要修改。
+const BASE_HINT_EMISSIVE = 0.3;
 
+// 飞镖：圆锥(镖尖) + 圆柱(镖身)，本地-Z方向为"前进方向"。跟之前完全一样，
+// 一个字符都没改，只是从"直接建到外层变量"改成了"包一层返回值"。
 function buildDart() {
   const group = new THREE.Group();
 
@@ -153,19 +224,176 @@ function buildDart() {
 
   const shaftGeo = new THREE.CylinderGeometry(0.009, 0.009, 0.09, 8);
   shaftGeo.rotateX(-Math.PI / 2);
-  shaftMat = new THREE.MeshStandardMaterial({
+  const shaftMat = new THREE.MeshStandardMaterial({
     color: 0xff6b4a, metalness: 0.2, roughness: 0.5,
-    emissive: 0x4a1c0a, emissiveIntensity: BASE_SHAFT_EMISSIVE,
+    emissive: 0x4a1c0a, emissiveIntensity: BASE_HINT_EMISSIVE,
   });
   const shaft = new THREE.Mesh(shaftGeo, shaftMat);
   shaft.position.z = 0.045;
   group.add(shaft);
 
-  return group;
+  return { group, hintMat: shaftMat };
 }
 
-const dart = buildDart();
-scene.add(dart);
+// 番茄：一个球体，轻微不均匀缩放模拟"圆润但不完美"的手工感，不追求写实
+function buildTomato() {
+  const group = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0xcc2a1e, roughness: 0.55, metalness: 0.05,
+    emissive: 0x4a0a06, emissiveIntensity: BASE_HINT_EMISSIVE,
+  });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.045, 14, 12), bodyMat);
+  body.scale.set(1, 0.92, 1.06); // 轻微挤压，别做成完美的球
+  group.add(body);
+
+  // 蒂头：一小截深绿圆柱+一撮小圆锥叶片，纯装饰，几何量极小
+  const stemMat = new THREE.MeshStandardMaterial({ color: 0x2a4a1c, roughness: 0.8 });
+  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.008, 0.02, 6), stemMat);
+  stem.position.y = 0.045;
+  group.add(stem);
+
+  return { group, hintMat: bodyMat };
+}
+
+// 斧头：圆柱(柄) + 压扁的四棱锥(斧刃)，示意性造型，不做真实斧头建模
+function buildAxe() {
+  const group = new THREE.Group();
+
+  const handleMat = new THREE.MeshStandardMaterial({ color: 0x5a3a20, roughness: 0.9 });
+  const handleGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.15, 6);
+  handleGeo.rotateX(-Math.PI / 2); // 跟飞镖同样的约定：本地-Z是"前进方向"（斧刃朝前）
+  const handle = new THREE.Mesh(handleGeo, handleMat);
+  group.add(handle);
+
+  const bladeMat = new THREE.MeshStandardMaterial({
+    color: 0xaab0b8, metalness: 0.7, roughness: 0.3,
+    emissive: 0x2a3a44, emissiveIntensity: BASE_HINT_EMISSIVE,
+  });
+  const bladeGeo = new THREE.ConeGeometry(0.045, 0.05, 4); // 4棱锥，压扁后是个楔形刃口
+  bladeGeo.rotateX(-Math.PI / 2);
+  bladeGeo.scale(1, 1, 0.3);
+  const blade = new THREE.Mesh(bladeGeo, bladeMat);
+  blade.position.z = -0.07; // 挪到柄的前端
+  group.add(blade);
+
+  return { group, hintMat: bladeMat };
+}
+
+// ---------- 投掷物类型配置：外观/尾焰颜色/命中反馈都从这里查 ----------
+const ITEM_ORDER = ['dart', 'tomato', 'axe'];
+const ITEM_TYPES = {
+  dart:   { label: '飞镖', trailColor: 0xff8844 },
+  tomato: { label: '番茄', trailColor: 0xff4444 },
+  axe:    { label: '斧头', trailColor: 0x99aabb },
+};
+
+const itemGroups = {
+  dart: buildDart(),
+  tomato: buildTomato(),
+  axe: buildAxe(),
+};
+for (const type of ITEM_ORDER) {
+  itemGroups[type].group.visible = false;
+  scene.add(itemGroups[type].group); // 三个都提前建好、加进场景，切换时只是切visible，不重复创建/销毁
+}
+
+let currentItemType = 'dart';
+itemGroups.dart.group.visible = true;
+
+// dart/currentHintMat是下面所有抓取/投掷/命中代码统一操作的"当前生效物体"
+// 引用——用let而不是const，是因为切换类型时要重新指向另一个预建好的group，
+// 除此之外，所有读写dart.position/dart.quaternion/currentHintMat.xxx的代码
+// 一个字都不用改，它们本来就不知道也不需要知道具体是哪种物体。
+let dart = itemGroups.dart.group;
+let currentHintMat = itemGroups.dart.hintMat;
+let currentTrailColor = ITEM_TYPES.dart.trailColor; // 尾焰粒子颜色，按当前类型走，spawnSpark()那边直接读这个
+
+// ---------- 飞行尾焰/火星拖尾：Points粒子池，固定上限，不用GPU粒子系统 ----------
+// 只在dartState===FLYING期间生成，读dartVelocity/dart.position（只读，不改
+// 抓取/投掷/碰撞检测的任何逻辑），跟物理系统完全解耦。用对象池+固定大小
+// 的BufferAttribute，每帧原地更新，不做每帧new/delete，成本可控。
+const MAX_SPARKS = 80; // "几十个量级"，留够余量但不会太多
+const sparkPositions = new Float32Array(MAX_SPARKS * 3);
+const sparkColorsArr = new Float32Array(MAX_SPARKS * 3);
+const sparkGeo = new THREE.BufferGeometry();
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
+sparkGeo.setAttribute('color', new THREE.BufferAttribute(sparkColorsArr, 3));
+
+// 小圆点贴图（径向渐变），让粒子看起来是柔和的光点而不是硬边方块
+const dotCanvas = document.createElement('canvas');
+dotCanvas.width = 32;
+dotCanvas.height = 32;
+const dctx = dotCanvas.getContext('2d');
+const grad = dctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+grad.addColorStop(0, 'rgba(255,255,255,1)');
+grad.addColorStop(0.4, 'rgba(255,255,255,0.7)');
+grad.addColorStop(1, 'rgba(255,255,255,0)');
+dctx.fillStyle = grad;
+dctx.fillRect(0, 0, 32, 32);
+const dotTexture = new THREE.CanvasTexture(dotCanvas);
+
+const sparkMat = new THREE.PointsMaterial({
+  size: 0.035, sizeAttenuation: true, vertexColors: true,
+  map: dotTexture, transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending, // 叠加混合，重叠的火星看起来更"发光"而不是糊成一片
+});
+const sparkPoints = new THREE.Points(sparkGeo, sparkMat);
+scene.add(sparkPoints);
+
+const sparkActive = new Array(MAX_SPARKS).fill(false);
+const sparkVel = new Array(MAX_SPARKS).fill(null).map(() => new THREE.Vector3());
+const sparkAge = new Float32Array(MAX_SPARKS);
+const sparkLife = new Float32Array(MAX_SPARKS);
+const sparkBaseColor = new Array(MAX_SPARKS).fill(null).map(() => new THREE.Color());
+let sparkCursor = 0; // 循环分配槽位，旧粒子还没消失也会被新粒子顶替（池子满了的兜底行为，正常情况下不会撞上）
+// currentTrailColor在上面"三种可选投掷物"那一段已经声明并初始化过了，
+// switchItemType()切换类型时会更新它，spawnSpark()调用处直接读
+
+const tmpSparkJitter = new THREE.Vector3();
+function spawnSpark(position, backwardDir, speedFactor, colorHex) {
+  const i = sparkCursor;
+  sparkCursor = (sparkCursor + 1) % MAX_SPARKS;
+  sparkActive[i] = true;
+  sparkAge[i] = 0;
+  sparkLife[i] = 0.22 + Math.random() * 0.18;
+
+  tmpSparkJitter.set((Math.random() - 0.5) * 0.7, (Math.random() - 0.5) * 0.7, (Math.random() - 0.5) * 0.7);
+  sparkVel[i].copy(backwardDir).multiplyScalar(0.4 + speedFactor * 1.3).add(tmpSparkJitter);
+  sparkBaseColor[i].set(colorHex);
+
+  sparkPositions[i * 3] = position.x;
+  sparkPositions[i * 3 + 1] = position.y;
+  sparkPositions[i * 3 + 2] = position.z;
+}
+
+function updateSparks(dt) {
+  for (let i = 0; i < MAX_SPARKS; i++) {
+    if (!sparkActive[i]) continue;
+    sparkAge[i] += dt;
+    if (sparkAge[i] >= sparkLife[i]) {
+      sparkActive[i] = false;
+      // 熄灭时把颜色清零，不然这个槽位在被下一次spawn复用之前会一直
+      // 显示"卡住"的最后一帧亮点
+      sparkColorsArr[i * 3] = 0;
+      sparkColorsArr[i * 3 + 1] = 0;
+      sparkColorsArr[i * 3 + 2] = 0;
+      continue;
+    }
+
+    sparkVel[i].y -= 1.2 * dt; // 比真实重力(9.8)轻很多，火星飘得慢一点更好看，不是物理精确
+    sparkVel[i].multiplyScalar(0.94); // 空气阻力衰减，让粒子逐渐减速而不是匀速飞太远
+    sparkPositions[i * 3] += sparkVel[i].x * dt;
+    sparkPositions[i * 3 + 1] += sparkVel[i].y * dt;
+    sparkPositions[i * 3 + 2] += sparkVel[i].z * dt;
+
+    const fade = 1 - sparkAge[i] / sparkLife[i]; // 用颜色亮度衰减模拟alpha淡出（配合加法混合，暗=透明）
+    sparkColorsArr[i * 3] = sparkBaseColor[i].r * fade;
+    sparkColorsArr[i * 3 + 1] = sparkBaseColor[i].g * fade;
+    sparkColorsArr[i * 3 + 2] = sparkBaseColor[i].b * fade;
+  }
+  sparkGeo.attributes.position.needsUpdate = true;
+  sparkGeo.attributes.color.needsUpdate = true;
+}
 
 // ---------- 音效：Web Audio API合成，不引入外部音频文件 ----------
 // 排查记录（2026-07-10）：上一版实机测试完全没有声音，原因是AudioContext
@@ -267,6 +495,34 @@ const HIT_SOUND_BY_SCORE = {
 };
 function playHitSound(scoreValue) {
   (HIT_SOUND_BY_SCORE[scoreValue] || HIT_SOUND_BY_SCORE[0])();
+}
+
+// 番茄命中："偏闷"的音调——独立的振荡器+lowpass滤波器组合（不是复用playTone，
+// 因为playTone没有滤波环节，砍高频做出"闷"感需要单独接一个BiquadFilter），
+// 叠加一点点短促噪声模拟"啪"的质感。不按环数分级，砸中就是这一个声音。
+function playTomatoHitSound() {
+  const ctx = ensureAudio();
+  const osc = ctx.createOscillator();
+  const filter = ctx.createBiquadFilter();
+  const g = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(180, ctx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(90, ctx.currentTime + 0.2);
+  filter.type = 'lowpass';
+  filter.frequency.value = 400; // 砍掉高频，听感发闷
+  g.gain.setValueAtTime(0, ctx.currentTime);
+  g.gain.linearRampToValueAtTime(0.3, ctx.currentTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
+  osc.connect(filter).connect(g).connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + 0.24);
+  playNoiseBurst(0.15, 0.08);
+}
+
+// 斧头命中："咔"的钝重感——极低频音调+短促噪声叠加，不按环数分级
+function playAxeHitSound() {
+  playTone({ freq: 110, freqEnd: 70, duration: 0.16, type: 'triangle', gain: 0.32 });
+  playNoiseBurst(0.08, 0.14);
 }
 
 // ---------- 命中评级文字：Canvas贴图 + 简单缩放动画，参考街机投掷类游戏的即时反馈 ----------
@@ -537,6 +793,123 @@ function updateAnalogGrabInput() {
 // ---------- 场景内退出VR面板（见shared/，三个demo共用同一份逻辑） ----------
 const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
 
+// ---------- 投掷物选择面板：3个小方块，射线指向+抓握键点击切换 ----------
+// 视觉/交互模式照抄退出按钮那一套（挂在camera下、射线命中检测、hover高亮），
+// 但故意没有用户建议的trigger作为点击键，改用了squeeze——原因：trigger
+// 现在全局绑定的是"抓取当前物体"（对着任意方向扣扳机都会尝试抓取，没有
+// 距离/朝向限制），如果选择面板也用trigger点击，指着菜单选东西的同时
+// 会同时把这一下trigger也算成"抓取"，两个操作打架。squeeze现在只有退出
+// 按钮在用，而这个面板放在视野左下方（退出按钮在右下方），两块面板离得
+// 够开，同一根射线不会同时扫到两个，不会互相误触。这是一个跟你原话不
+// 完全一致的实现决定，写在这里说明原因，README里也会提一句。
+const SELECT_PANEL_OFFSET = new THREE.Vector3(-0.34, -0.20, -0.55);
+const OPTION_SIZE = 0.09;
+const OPTION_GAP = 0.014;
+
+const selectPanelGroup = new THREE.Group();
+selectPanelGroup.position.copy(SELECT_PANEL_OFFSET);
+camera.add(selectPanelGroup);
+
+const optionMeshes = {}; // type -> { mesh, canvas, ctx, texture }
+ITEM_ORDER.forEach((type, idx) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 160;
+  canvas.height = 160;
+  const ctx = canvas.getContext('2d');
+  const texture = new THREE.CanvasTexture(canvas);
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(OPTION_SIZE, OPTION_SIZE),
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false })
+  );
+  mesh.position.set(idx * (OPTION_SIZE + OPTION_GAP), 0, 0);
+  mesh.renderOrder = 999;
+  selectPanelGroup.add(mesh);
+  optionMeshes[type] = { mesh, canvas, ctx, texture };
+});
+
+function drawOption(type, hovered, selected) {
+  const { ctx, canvas, texture } = optionMeshes[type];
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = selected ? 'rgba(50,120,80,0.9)' : hovered ? 'rgba(120,30,30,0.9)' : 'rgba(10,14,22,0.75)';
+  ctx.strokeStyle = selected ? '#8fffa8' : hovered ? '#ff9f7f' : '#3a4a60';
+  ctx.lineWidth = selected || hovered ? 6 : 3;
+  ctx.beginPath();
+  ctx.roundRect(4, 4, canvas.width - 8, canvas.height - 8, 14);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#cfe8ff';
+  ctx.font = 'bold 30px sans-serif';
+  ctx.fillText(ITEM_TYPES[type].label, canvas.width / 2, canvas.height / 2);
+
+  texture.needsUpdate = true;
+}
+ITEM_ORDER.forEach((type) => drawOption(type, false, type === currentItemType));
+
+function switchItemType(type) {
+  if (type === currentItemType || !itemGroups[type]) return;
+  if (dartState !== STATE.IDLE) return; // 持有/飞行中不允许切换，避免半路换物体产生奇怪的状态
+
+  itemGroups[currentItemType].group.visible = false;
+  currentItemType = type;
+  dart = itemGroups[type].group;
+  currentHintMat = itemGroups[type].hintMat;
+  currentTrailColor = ITEM_TYPES[type].trailColor;
+  dart.visible = true;
+
+  ITEM_ORDER.forEach((t) => drawOption(t, false, t === currentItemType));
+  console.log('[item] 切换投掷物为', type);
+}
+
+const selectRaycaster = new THREE.Raycaster();
+const selectRayOrigin = new THREE.Vector3();
+const selectRayDir = new THREE.Vector3();
+let pendingItemSqueeze = [];
+
+[controller0, controller1].forEach((controller) => {
+  controller.addEventListener('squeezestart', () => {
+    pendingItemSqueeze.push(controller);
+  });
+});
+
+function controllerHitsOption(controller, type) {
+  controller.updateWorldMatrix(true, false);
+  selectRayOrigin.setFromMatrixPosition(controller.matrixWorld);
+  selectRayDir.set(0, 0, -1).transformDirection(controller.matrixWorld);
+  selectRaycaster.set(selectRayOrigin, selectRayDir);
+  return selectRaycaster.intersectObject(optionMeshes[type].mesh, false).length > 0;
+}
+
+function updateItemSelectPanel() {
+  camera.updateMatrixWorld(true); // 面板是camera子物体，跟退出按钮同样的道理，先刷新矩阵
+
+  let hoveredType = null;
+  outer:
+  for (const controller of [controller0, controller1]) {
+    for (const type of ITEM_ORDER) {
+      if (controllerHitsOption(controller, type)) {
+        hoveredType = type;
+        break outer;
+      }
+    }
+  }
+  ITEM_ORDER.forEach((type) => drawOption(type, type === hoveredType, type === currentItemType));
+
+  if (pendingItemSqueeze.length > 0) {
+    for (const controller of pendingItemSqueeze) {
+      for (const type of ITEM_ORDER) {
+        if (controllerHitsOption(controller, type)) {
+          switchItemType(type);
+          break;
+        }
+      }
+    }
+    pendingItemSqueeze = [];
+  }
+}
+
 const tmpControllerPos = new THREE.Vector3();
 const tmpControllerQuat = new THREE.Quaternion();
 const tmpOffset = new THREE.Vector3();
@@ -641,20 +1014,132 @@ function colorForScore(scoreValue) {
   return ring ? ring.color : '#666666'; // 脱靶(0分)用灰色标记，跟计分环颜色区分开
 }
 
+// ---------- 番茄命中效果："砸扁"缩放动画 + 几片果肉飞溅 ----------
+// 独立生成一个临时的装饰性splat效果，不是拿真正的番茄物体去做变形——真正
+// 的番茄物体命中后跟其他物体一样立刻resetDartToIdle飞回中性位置，如果直接
+// 在它身上做形变动画，飞回去的过程会同时在"跑"和"变形"，观感很怪。这个
+// 做法跟命中标记点/评级文字的生命周期管理是同一套模式。
+const SPLAT_LIFETIME = 550; // ms
+const splatEffects = []; // { splatMesh, chunkMeshes: [{mesh, vel}], createdAt }
+
+function spawnTomatoSplat(x, y) {
+  const splatMat = new THREE.MeshBasicMaterial({ color: 0xcc2a1e, transparent: true });
+  const splatMesh = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), splatMat);
+  splatMesh.position.set(x, y, TARGET_POS.z + 0.008);
+  scene.add(splatMesh);
+
+  // 2~3片果肉飞溅碎片，简单的小平面朝外飞散，不做液体模拟
+  const chunkCount = 2 + Math.floor(Math.random() * 2);
+  const chunkMeshes = [];
+  for (let i = 0; i < chunkCount; i++) {
+    const chunkMat = new THREE.MeshBasicMaterial({ color: 0xdd3322, transparent: true, side: THREE.DoubleSide });
+    const chunk = new THREE.Mesh(new THREE.PlaneGeometry(0.018, 0.018), chunkMat);
+    chunk.position.set(x, y, TARGET_POS.z + 0.01);
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 0.35 + Math.random() * 0.45;
+    const vel = new THREE.Vector3(Math.cos(angle) * speed, 0.25 + Math.random() * 0.35, (Math.random() - 0.5) * 0.15);
+    scene.add(chunk);
+    chunkMeshes.push({ mesh: chunk, vel });
+  }
+
+  splatEffects.push({ splatMesh, chunkMeshes, createdAt: performance.now() });
+}
+
+function updateSplatEffects(dt) {
+  const now = performance.now();
+  for (let i = splatEffects.length - 1; i >= 0; i--) {
+    const eff = splatEffects[i];
+    const age = now - eff.createdAt;
+    const t = Math.min(age / SPLAT_LIFETIME, 1);
+
+    if (t >= 1) {
+      scene.remove(eff.splatMesh);
+      eff.splatMesh.material.dispose();
+      for (const c of eff.chunkMeshes) {
+        scene.remove(c.mesh);
+        c.mesh.material.dispose();
+      }
+      splatEffects.splice(i, 1);
+      continue;
+    }
+
+    // 命中瞬间前120ms快速压扁（Y轴骤减、XZ轴增大），模拟"砸扁"的形变，
+    // 之后维持压扁状态慢慢淡出
+    const squashT = Math.min(age / 120, 1);
+    const squashY = 1 - squashT * 0.75;
+    const squashXZ = 1 + squashT * 0.9;
+    eff.splatMesh.scale.set(squashXZ, squashY, squashXZ);
+    eff.splatMesh.material.opacity = 1 - t;
+
+    for (const c of eff.chunkMeshes) {
+      c.vel.y -= 1.5 * dt; // 比真实重力轻，飞溅的果肉碎片飘得慢一点更好看
+      c.mesh.position.addScaledVector(c.vel, dt);
+      c.mesh.material.opacity = 1 - t;
+      c.mesh.quaternion.copy(camera.quaternion); // 碎片是平面，朝向摄像机看起来更自然
+    }
+  }
+}
+
+// ---------- 斧头命中效果：靶面短暂震动，模拟钝器命中的冲击感 ----------
+// 直接抖动targetMesh/backboard的position，几帧内衰减归零，不引入额外的
+// 装饰性物体。跟命中判定用的TARGET_POS是同一个源，抖动结束后精确复位，
+// 不会有浮点误差累积导致靶子慢慢"跑偏"的问题。
+let targetShakeTime = 0; // 剩余抖动时间(秒)
+const TARGET_SHAKE_DURATION = 0.18;
+
+function triggerTargetShake() {
+  targetShakeTime = TARGET_SHAKE_DURATION;
+}
+
+function updateTargetShake(dt) {
+  if (targetShakeTime <= 0) {
+    targetShakeTime = 0;
+    // 确保没有抖动时精确回到原位，避免浮点误差累积
+    targetMesh.position.copy(TARGET_POS);
+    backboard.position.copy(TARGET_POS).add(new THREE.Vector3(0, 0, -0.02));
+    return;
+  }
+  targetShakeTime -= dt;
+  const intensity = Math.max(targetShakeTime / TARGET_SHAKE_DURATION, 0) * 0.02;
+  const offsetX = (Math.random() - 0.5) * intensity;
+  const offsetY = (Math.random() - 0.5) * intensity;
+  targetMesh.position.set(TARGET_POS.x + offsetX, TARGET_POS.y + offsetY, TARGET_POS.z);
+  backboard.position.set(TARGET_POS.x + offsetX, TARGET_POS.y + offsetY, TARGET_POS.z - 0.02);
+}
+
 // ---------- 命中判定：飞镖飞行过程中，每帧检测是否穿过靶所在的平面 ----------
 // hitPoint为{x,y,dist}表示这一次确实穿过了靶平面（不管有没有落在环内），
 // 为null表示是"落地/超时"兜底判的脱靶，没有真实穿越点可标记。
 function resolveThrow(scoreValue, hitPoint) {
-  console.log('[throw] resolveThrow被调用, scoreValue =', scoreValue, ', hitPoint =', hitPoint);
+  console.log('[throw] resolveThrow被调用, scoreValue =', scoreValue, ', hitPoint =', hitPoint, ', itemType =', currentItemType);
   lastScore = scoreValue;
   totalScore += scoreValue;
   throwCount += 1;
   lastHitDistance = hitPoint ? hitPoint.dist : null;
   if (hitPoint) {
+    // 通用反馈：命中标记点+评级文字，三种物体都有，跟之前完全一样
     spawnHitMarker(hitPoint.x, hitPoint.y, colorForScore(scoreValue));
     spawnRatingText(hitPoint.x, hitPoint.y, scoreValue);
+
+    // 差异化反馈：在通用反馈之上叠加各自的效果。飞镖不额外加任何东西，
+    // 保持跟之前完全一样的表现。
+    if (currentItemType === 'tomato') {
+      spawnTomatoSplat(hitPoint.x, hitPoint.y);
+    } else if (currentItemType === 'axe') {
+      triggerTargetShake();
+    }
   }
-  playHitSound(scoreValue);
+
+  // 音效同样按类型分流；不管命不命中靶面(hitPoint是否为null)都会响，
+  // 保持跟之前"每次投掷都有声音反馈"的行为一致
+  if (currentItemType === 'tomato') {
+    playTomatoHitSound();
+  } else if (currentItemType === 'axe') {
+    playAxeHitSound();
+  } else {
+    playHitSound(scoreValue);
+  }
+
   resetDartToIdle();
 }
 
@@ -672,6 +1157,17 @@ function updateFlying(dt) {
   if (dartVelocity.lengthSq() > 0.0001) {
     const lookTarget = newDartPos.clone().add(dartVelocity.clone().normalize());
     dart.lookAt(lookTarget);
+  }
+
+  // ---- 拖尾火星特效：只读当前速度/位置生成装饰性粒子，不反过来影响物理 ----
+  // 飞得越快尾焰越密集，直接复用上面刚算出来的dartVelocity，不引入新的
+  // 速度概念。currentTrailColor在多物体切换加进来后会按投掷物类型变化。
+  const speedFactor = THREE.MathUtils.clamp(dartVelocity.length() / 8, 0, 1);
+  const sparkCount = 1 + Math.round(speedFactor * 2);
+  const tailWorld = dart.localToWorld(new THREE.Vector3(0, 0, 0.06));
+  const sparkBackward = dartVelocity.clone().normalize().multiplyScalar(-1);
+  for (let s = 0; s < sparkCount; s++) {
+    spawnSpark(tailWorld, sparkBackward, speedFactor, currentTrailColor);
   }
 
   flightTime += dt;
@@ -751,21 +1247,26 @@ function animate() {
     dart.quaternion.identity();
 
     // 预抓取发光提示：扳机压力过了PRE_GRAB_THRESHOLD但还没到GRAB_THRESHOLD时，
-    // 让镖身做一个呼吸感的高亮，告诉用户"已经在可抓取范围了，继续按"
+    // 让当前物体的主材质做一个呼吸感的高亮，告诉用户"已经在可抓取范围了，继续按"。
+    // currentHintMat跟着currentItemType变化，三种物体通用同一套逻辑。
     if (hintOn) {
-      shaftMat.emissiveIntensity = 0.9 + Math.sin(now / 120) * 0.6;
+      currentHintMat.emissiveIntensity = 0.9 + Math.sin(now / 120) * 0.6;
     } else {
-      shaftMat.emissiveIntensity = BASE_SHAFT_EMISSIVE;
+      currentHintMat.emissiveIntensity = BASE_HINT_EMISSIVE;
     }
   }
 
   updateHitMarkers(now);
   updateRatingTexts(now);
+  updateSparks(dt); // 不管在不在飞行，已经存在的火星粒子都要继续衰减/淡出
+  updateSplatEffects(dt);
+  updateTargetShake(dt);
 
   // 面板始终朝向摄像机（billboard）
   panel.quaternion.copy(camera.quaternion);
 
   exitButton.update();
+  updateItemSelectPanel();
 
   renderer.render(scene, camera);
 
