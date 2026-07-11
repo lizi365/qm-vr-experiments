@@ -7,7 +7,8 @@
 //
 // 用法：
 //   import { createXRExitButton } from '../shared/xrExitButton.js';
-//   const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
+//   const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1]);
+//   // 可选：createXRExitButton(renderer, camera, scene, controllers, { position, size })
 //   // 在animate()里每帧调用一次：
 //   exitButton.update();
 //
@@ -17,27 +18,31 @@
 // 才不会互相打架。demo1的trigger(select)绑定的是"切换粒子档位"，逻辑是
 // "不管指哪都会响应"，这里改用squeeze跟它完全不共享按键，也不冲突；
 // demo0没有绑定任何自定义手柄事件，同样安全。
+//
+// 2026-07-11第七轮：真机反馈面板离摄像机太近(原z=-0.55，camera子物体)导致
+// 手柄射线瞄不准，当时的做法是"挪到z=-1.3，同时把尺寸和偏移按同样倍数
+// 放大，维持屏幕视觉大小不变"。
+// 2026-07-11第八轮：用户指出纯粹等距缩放不解决根本问题——面板在视野里
+// 占的角度范围没变，射线覆盖不全的问题还在。这次换思路：面板不再是
+// camera的子物体，而是挂在scene下的世界固定位置，放在跟各demo主要内容
+// (demo0/1的立方体、demo-dart的靶/敌人)差不多的距离范围——这个距离玩家
+// 全程都在用手柄射线/抛物线瞄准那些物体，直接复用同一套已经练熟的瞄准
+// 手感，而不是另外发明一个"UI专属"的距离。默认位置/尺寸适配demo0/demo1
+// 的内容深度(约3.5米)，demo-dart的靶/敌人更远(约4.5米)，通过options自己
+// 传了一组更远、也相应更大的position/size。挂到scene下之后不再需要
+// 每帧camera.updateMatrixWorld()——那是camera子物体时代的产物，面板现在
+// 的世界矩阵由场景图的常规每帧更新维护，不依赖camera。
 
 import * as THREE from 'three';
 
-export function createXRExitButton(renderer, camera, controllers) {
-  // 2026-07-11：真机反馈"手柄射线完全无法瞄准"这一批面板都离摄像机太近
-  // (原来z=-0.55，不到0.6米)——面板是camera子物体，跟头一起动，但手柄
-  // 位置是独立6DOF追踪的，离头有一段真实的物理距离；面板离头越近，手柄
-  // 射线要精确对上它所需要的角度窗口就越窄，稍微一偏手就完全指不到。
-  // 常见WebXR UI面板经验值是放在1-2米这个区间，这里选1.3米。WIDTH/HEIGHT
-  // 和OFFSET的x/y都按跟原来相同的倍数(1.3/0.55≈2.364)放大，这样从摄像机
-  // 看过去的视觉大小/屏幕位置基本不变，只是把面板本身挪远了，纯粹是为了
-  // 换取手柄更宽松的瞄准角度容差。这一项没有真机条件验证，1.3米是否
-  // 合适需要下一轮真机测试确认，见demo-dart的README。
-  const WIDTH = 0.567;
-  const HEIGHT = 0.236;
+export function createXRExitButton(renderer, camera, scene, controllers, options = {}) {
+  const WIDTH = options.size ? options.size.width : 0.75;
+  const HEIGHT = options.size ? options.size.height : 0.31;
 
-  // 面板挂在摄像机下面，作为camera的子物体——camera的世界矩阵在VR里由
-  // renderer.xr每帧自动同步成头显姿态，子物体自然跟着头动，不用自己每帧
-  // 手动copy位置/朝向。位置选在视野右下方外侧：平时正常看东西不会碰到，
-  // 但只要稍微低头/瞟一眼右下就能看到，符合"不容易误触但能主动看到"的要求。
-  const OFFSET = new THREE.Vector3(0.756, -0.662, -1.3);
+  // 默认位置对应demo0/demo1的主要内容深度(约z=-1.4，距摄像机约3.5米)，
+  // 放在右侧、略高于视线的位置——不需要跟demo0/1现有内容的确切坐标对齐，
+  // 只要在同一个"玩家已经习惯瞄准"的距离范围内、且不挡住主要内容即可。
+  const WORLD_POS = options.position || new THREE.Vector3(1.1, 1.7, -1.4);
 
   const canvas = document.createElement('canvas');
   canvas.width = 384;
@@ -71,9 +76,9 @@ export function createXRExitButton(renderer, camera, controllers) {
     new THREE.PlaneGeometry(WIDTH, HEIGHT),
     new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false })
   );
-  panel.position.copy(OFFSET);
+  panel.position.copy(WORLD_POS);
   panel.renderOrder = 999;
-  camera.add(panel);
+  scene.add(panel);
 
   const raycaster = new THREE.Raycaster();
   const rayOrigin = new THREE.Vector3();
@@ -100,10 +105,6 @@ export function createXRExitButton(renderer, camera, controllers) {
   }
 
   function update() {
-    // 面板是camera的子物体，先确保它这一帧的世界矩阵是最新的，
-    // 否则射线检测会用上一帧的位置，头一转就会有一帧的判定偏差。
-    camera.updateMatrixWorld(true);
-
     let hoveredNow = false;
     for (const controller of controllers) {
       if (controllerHitsPanel(controller)) {

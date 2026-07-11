@@ -215,7 +215,7 @@ controller0.add(ray0);
 controller1.add(ray1);
 
 // ---------- 场景内退出VR面板（见shared/，三个demo共用同一份逻辑） ----------
-const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
+const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1]);
 
 // ---------- 桌面模式：数字键切换档位 ----------
 window.addEventListener('keydown', (e) => {

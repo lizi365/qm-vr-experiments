@@ -95,7 +95,7 @@ const controller0 = renderer.xr.getController(0);
 const controller1 = renderer.xr.getController(1);
 scene.add(controller0);
 scene.add(controller1);
-const exitButton = createXRExitButton(renderer, camera, [controller0, controller1]);
+const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1]);
 
 // ---------- 悬浮文字面板（canvas贴图，VR内可读，不依赖DOM） ----------
 const panelCanvas = document.createElement('canvas');
