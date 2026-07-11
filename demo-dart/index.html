@@ -783,7 +783,7 @@ function resetDartToIdle() {
 const GRAB_THRESHOLD = 0.6;    // 模拟量超过这个值，判定为"确实抓住了"
 const RELEASE_THRESHOLD = 0.45; // 比GRAB_THRESHOLD低一截，做个迟滞区间，避免数值在临界点抖动导致反复抓/放
 const PRE_GRAB_THRESHOLD = 0.3; // 超过这个值但还没到GRAB_THRESHOLD，触发"预抓取"发光提示
-const GRAB_BUTTON_INDEX = 0; // xr-standard映射：0=trigger扳机（这次改用的键），1=squeeze抓握键（现在给退出按钮用）
+const GRAB_BUTTON_INDEX = 0; // xr-standard映射：0=trigger扳机（这次改用的键），1=squeeze抓握键（现在给道具切换用，退出VR第九轮改成了独立的手柄按键，不再用squeeze）
 
 const inputSources = [null, null]; // 对应 controller0/controller1 的 XRInputSource，从connected事件拿
 
@@ -931,14 +931,15 @@ function updateAnalogGrabInput() {
   if (dartState === STATE.IDLE) hintOn = hint;
 }
 
-// ---------- 场景内退出VR面板（见shared/，三个demo共用同一份逻辑） ----------
-// 2026-07-11第八轮：改成世界固定位置，放在靶/敌人所在的深度附近(见
-// shared/xrExitButton.js顶部的说明)，跟物品选择面板对称地放在右侧，
-// 同样避开第二/三关敌人巡逻的x范围(-1.3~1.3)。
-const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1], {
-  position: new THREE.Vector3(1.9, 1.7, -2.3),
-  size: { width: 0.9, height: 0.375 },
-});
+// ---------- 场景内退出VR提示牌（见shared/，三个demo共用同一份逻辑） ----------
+// 2026-07-11第九轮：退出VR改成手柄专属按键直接触发(见shared/xrExitButton.js
+// 顶部说明)，不再需要瞄准点击——第七/八轮把面板挪远、放大、挪去scene下
+// 世界坐标，全部是为了解决"瞄准"这一件事，现在既然不需要瞄准了，那些
+// 调整的前提也就不存在了。这块牌子现在纯粹是展示"按哪个键"的说明牌，
+// 挪回最初的位置和样式——camera子物体、视野右下角，平时不会挡视线，
+// 偶尔低头瞟一眼就能看到，跟"不常用但需要能找到"的说明牌定位一致。
+// 这正好是shared/xrExitButton.js的默认position/size，不用再单独传options。
+const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1]);
 
 // ---------- 投掷物选择面板：3个小方块，射线指向+抓握键点击切换 ----------
 // 视觉/交互模式照抄退出按钮那一套（挂在camera下、射线命中检测、hover高亮），
@@ -1030,6 +1031,24 @@ function switchItemType(type) {
   console.log('[item] 切换投掷物为', type);
 }
 
+// 2026-07-11第九轮：squeeze键在"道具切换"和"抓取投掷物"之间的判定规则
+// （完整状态机见README"按键行为规则"一节）——
+//   dartState===IDLE(手上没有持有投掷物)时：squeeze按下直接循环切换到
+//   下一个道具(dart→tomato→axe→dart)，这是现在的主要切换方式，不需要
+//   瞄准任何东西；如果squeeze按下的同时手柄射线正好指着选择面板上的
+//   某个具体选项，那次squeeze优先做"精确选中该选项"，而不是简单循环
+//   （瞄准面板作为备选/精确选择方式保留，位置沿用(-1.9,2.0,-2.3)不变）。
+//   dartState!==IDLE(HELD/FLYING，手上正抓着或正在飞的投掷物)时：squeeze
+//   不做任何道具切换相关的事情——抓取/投掷的状态机完全由trigger(扳机)
+//   驱动(GRAB_BUTTON_INDEX=0，受保护常量)，squeeze在这个状态下单纯被
+//   忽略，不会跟trigger的抓取判定冲突，也不会误触切换。
+function cycleItemType() {
+  if (dartState !== STATE.IDLE) return;
+  const idx = ITEM_ORDER.indexOf(currentItemType);
+  const next = ITEM_ORDER[(idx + 1) % ITEM_ORDER.length];
+  switchItemType(next);
+}
+
 const selectRaycaster = new THREE.Raycaster();
 const selectRayOrigin = new THREE.Vector3();
 const selectRayDir = new THREE.Vector3();
@@ -1068,11 +1087,14 @@ function updateItemSelectPanel() {
 
   if (pendingItemSqueeze.length > 0) {
     for (const controller of pendingItemSqueeze) {
+      let hitType = null;
       for (const type of ITEM_ORDER) {
-        if (controllerHitsOption(controller, type)) {
-          switchItemType(type);
-          break;
-        }
+        if (controllerHitsOption(controller, type)) { hitType = type; break; }
+      }
+      if (hitType) {
+        switchItemType(hitType); // 瞄准面板精确选中，优先级更高
+      } else {
+        cycleItemType(); // 没瞄准面板时，squeeze的默认行为是循环切换到下一个道具
       }
     }
     pendingItemSqueeze = [];
@@ -1109,20 +1131,26 @@ heartsCanvas.width = 300;
 heartsCanvas.height = 100;
 const heartsCtx = heartsCanvas.getContext('2d');
 const heartsTexture = new THREE.CanvasTexture(heartsCanvas);
-// 2026-07-11第八轮：上一轮的指示是"心形血量这类只读面板不用动，维持贴近
-// 视野的位置"，这一轮用户明确把血量也列进了需要重新定位的浮层里——跟
-// 物品选择面板/退出VR面板同样的道理，挪到scene下的世界固定位置，放在
-// 靶/敌人所在深度附近的正上方（不挡视野中央，也不会被巡逻中的狐狸/狼
-// 撞上）。注意这跟进度条(progressMesh)是两个完全独立的Mesh/贴图对象，
-// 不共用同一个面板——这次只挪了心形血量，进度条按用户这次的说明维持
-// 现状不动。
+// 2026-07-11第八轮：上一轮把血量挪到scene下的世界固定位置(跟靶/敌人
+// 同深度)，跟物品选择面板/退出VR面板一样的处理。
+// 2026-07-11第九轮：真机反馈血量应该跟得分/进度条面板对齐、放在同一个
+// 视野区域——血量是纯只读展示（不需要瞄准/点击），跟进度条(progressMesh)
+// 性质完全一样，这次改回camera子物体，紧贴在进度条左侧、同一竖直高度，
+// 两者视觉上组成同一片状态信息区。注意这仍然是两个独立的Mesh/贴图对象，
+// 没有合并成一张贴图，只是位置紧邻。
+// 第一版把偏移量设成-0.38，截图验证时发现在z=-0.55这么近的距离下，这点
+// 世界坐标偏移换算成视角就已经接近35°(atan(0.38/0.55))，视觉上被推到了
+// 屏幕边缘，完全不像"紧邻"——距离越近，同样的世界坐标偏移对应的视角
+// 越大，这是跟"手柄瞄准角度容差"同一个几何道理，只是这次体现在UI布局
+// 上。改成更小的尺寸(0.15m宽)+更小的偏移(-0.33，只比进度条左边缘0.25
+// 多出0.08)，重新截图确认这次真的贴在进度条左侧，不再飘到画面边缘。
 const heartsMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.55, 0.183),
+  new THREE.PlaneGeometry(0.15, 0.05),
   new THREE.MeshBasicMaterial({ map: heartsTexture, transparent: true, depthTest: false })
 );
-heartsMesh.position.set(0, 2.3, -2.3);
+heartsMesh.position.set(-0.33, 0.29, -0.55);
 heartsMesh.renderOrder = 999;
-scene.add(heartsMesh);
+camera.add(heartsMesh);
 
 // 用贝塞尔曲线画一个简单的心形，不依赖emoji字体渲染（不同头显/浏览器对
 // emoji字体的支持不一致，自己画的形状更可控）
@@ -1470,10 +1498,13 @@ function disposeObject3D(obj) {
   });
 }
 
+// 2026-07-11第九轮：途经点从{x,y}升级到{x,y,z}，引导线/标记点也要跟着用
+// 每个途经点自己的z（不再统一用config.z），才能真实反映三维路径的深度
+// 变化，不然引导线会退化成"z轴变化在视觉上完全看不出来"的假三维。
 function buildPatrolPathVisual(config) {
   const group = new THREE.Group();
   const color = config.pathColor || 0xffffff;
-  const points = config.waypoints.map((wp) => new THREE.Vector3(wp.x, wp.y, config.z));
+  const points = config.waypoints.map((wp) => new THREE.Vector3(wp.x, wp.y, wp.z !== undefined ? wp.z : config.z));
 
   const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
   const lineMat = new THREE.LineDashedMaterial({
@@ -1488,7 +1519,7 @@ function buildPatrolPathVisual(config) {
       new THREE.SphereGeometry(0.035, 8, 6),
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45 })
     );
-    marker.position.set(wp.x, wp.y, config.z);
+    marker.position.set(wp.x, wp.y, wp.z !== undefined ? wp.z : config.z);
     group.add(marker);
   }
   return group;
@@ -1518,9 +1549,9 @@ function setupEnemyLevel(enemyGrp, protectedGrp, config) {
 
   if (config.waypoints) {
     // 途经点模式(现在第二/三关都用)：从第一个途经点(约定为远端/安全端)出发。
-    // 途经点是{x,y}对，不是单纯的x数值——见下方updateWaypointMovement的说明
+    // 途经点现在是{x,y,z}三元组——见下方updateWaypointMovement的说明
     const wp0 = config.waypoints[0];
-    enemyGroup.position.set(wp0.x, wp0.y, config.z);
+    enemyGroup.position.set(wp0.x, wp0.y, wp0.z !== undefined ? wp0.z : config.z);
     patrolPathGroup = buildPatrolPathVisual(config);
     scene.add(patrolPathGroup);
   } else {
@@ -1566,7 +1597,7 @@ function updateEnemy(dt) {
       enemyPauseTimer = 0;
       if (enemyConfig.waypoints) {
         const wp0 = enemyConfig.waypoints[0];
-        enemyGroup.position.set(wp0.x, wp0.y, enemyConfig.z);
+        enemyGroup.position.set(wp0.x, wp0.y, wp0.z !== undefined ? wp0.z : enemyConfig.z);
       } else {
         // 重生也要回到远端(pathMaxX)重新出发，跟setupEnemyLevel同样的道理，
         // 不能直接生成在危险区里
@@ -1621,19 +1652,26 @@ function updateEnemy(dt) {
 // 小游戏的乐趣来源(红白机式设计)，随机移动只会让玩家觉得"不公平"而不是
 // "有意思"，2026-07-10按用户明确要求做成这样，不做随机版本。
 //
-// 2026-07-11修正：途经点现在是{x,y}对，同时插值x和y两个方向——上一版
-// 只让x变化(y全程固定在config.y)，本质上仍然是一条直线，只是加了停顿，
-// 之前用"x坐标随时间变化"的采样验证只证明了停顿节奏，没有验证路径的
-// 视觉形态是不是直线，这是上一轮验证方法本身的疏漏。这次改成2D插值
-// (Math.hypot算总距离，按比例同时移动x/y分量)，才能真正走出Z字形/S形
-// 路径。z坐标继续固定在config.z(=TARGET_POS.z)不变——tryHitEnemy和
-// 扣命判定(dangerDistance)都只比较x/y，从没用过z，所以只在x/y平面内
-// 绕路不会影响任何命中/受伤逻辑，也不会让狐狸跟穿越靶平面的番茄的
-// 碰撞检测产生视觉/数值不一致（如果贸然改z，番茄命中的判定平面和
-// 狐狸的视觉深度就会脱节，那样会更奇怪，所以特意只在x/y内绕）。
+// 2026-07-11第七轮修正：途经点从单纯的x数值改成{x,y}对，同时插值x和y——
+// 上一版只让x变化(y全程固定)，本质上仍然是一条直线，只是加了停顿。
+//
+// 2026-07-11第九轮：再升级成{x,y,z}三元组，同时插值x/y/z三个分量，路径
+// 终于用上了VR的深度维度，不再是纯平面的Z字形。z的变化范围经过刻意控制
+// （每个关卡config.waypoints里各点的z都收在TARGET_POS.z附近一个小区间内，
+// 具体数值见LEVEL_ENEMY_CONFIGS和README的参数表），原因：
+// tryHitEnemy()判定命中、dangerDistance判定扣命，都只比较x/y，从来没用过
+// z——这意味着改变z不会影响任何命中/受伤逻辑的正确性，但会影响"视觉上
+// 命中的时机"：番茄穿过靶所在的固定平面(z=TARGET_POS.z)那一刻才算命中，
+// 如果敌人此时的z跟这个平面差太多，命中特效(溅落/标记点，固定生成在
+// TARGET_POS.z这个平面上)跟敌人实际所在深度就会看起来对不上——敌人离
+// 这个平面越近，这个视觉误差越小。所以z只允许往"离靶更近、离玩家更近"
+// 的方向偏(z越小越接近玩家)，绝不允许比TARGET_POS.z更远(那会让敌人视觉
+// 上卡进背板backboard所在的平面)，且偏移幅度控制得比较保守，具体推导见
+// README"三维路径参数设计"一节。
 function updateWaypointMovement(dt, speed) {
   const wp = enemyConfig.waypoints;
   const target = wp[enemyWaypointIndex];
+  const targetZ = target.z !== undefined ? target.z : enemyConfig.z;
 
   if (enemyPauseTimer > 0) {
     enemyPauseTimer -= dt;
@@ -1648,16 +1686,19 @@ function updateWaypointMovement(dt, speed) {
 
   const dx = target.x - enemyGroup.position.x;
   const dy = target.y - enemyGroup.position.y;
-  const dist = Math.hypot(dx, dy);
+  const dz = targetZ - enemyGroup.position.z;
+  const dist = Math.hypot(dx, dy, dz);
   const step = speed * dt;
   if (dist <= step) {
     enemyGroup.position.x = target.x;
     enemyGroup.position.y = target.y;
+    enemyGroup.position.z = targetZ;
     enemyPauseTimer = enemyConfig.pauseDuration || 0;
     enemyBobPhase = 0;
   } else {
     enemyGroup.position.x += (dx / dist) * step;
     enemyGroup.position.y += (dy / dist) * step;
+    enemyGroup.position.z += (dz / dist) * step;
   }
 }
 
@@ -1776,6 +1817,9 @@ function buildFox() {
 
 function buildLamb() {
   const group = new THREE.Group();
+  // 2026-07-11第九轮：真机反馈狼/小羊的视觉细节明显不如第二关的狐狸/兔子
+  // （只有身体+四条腿，没有耳朵/尾巴/五官），参照狐狸/兔子当时补的思路
+  // （耳朵+尾巴+撞色色块）给小羊也加上同等程度的识别特征。
   const mat = new THREE.MeshStandardMaterial({ color: 0xebe6da, roughness: 0.95 });
   const body = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), mat);
   group.add(body);
@@ -1785,6 +1829,28 @@ function buildLamb() {
     leg.position.set(dx, -0.1, dz);
     group.add(leg);
   }
+
+  // 深色脸部色块：小羊经典的"黑脸"特征，跟白色羊毛身体形成撞色对比，
+  // 参考狐狸白色肚皮色块的同样思路——撞色让轮廓更容易一眼认出来
+  const faceMat = new THREE.MeshStandardMaterial({ color: 0x2a241f, roughness: 0.7 });
+  const face = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 6), faceMat);
+  face.position.set(0.09, 0.01, 0);
+  group.add(face);
+
+  // 两只小圆耳朵，贴着脸部两侧，比例扁平示意"下垂"感——羊耳朵的经典形态，
+  // 特意跟兔子那种竖直细长耳朵做区分，不会认错
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.025, 6, 6), faceMat);
+    ear.scale.set(1.4, 0.6, 0.8);
+    ear.position.set(0.08, 0, side * 0.05);
+    group.add(ear);
+  }
+
+  // 小尾巴：短而圆的小球，贴在身体后方
+  const tail = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 6), mat);
+  tail.position.set(-0.09, -0.01, 0);
+  group.add(tail);
+
   return group;
 }
 
@@ -1797,14 +1863,45 @@ function buildWolf() {
   const body = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), furMat);
   body.scale.set(1.4, 0.9, 1);
   group.add(body);
+
+  // 浅灰肚皮色块：跟狐狸白色肚皮同样的撞色思路，冷色系的浅灰在暗场景里
+  // 仍然能形成对比，不需要用太跳的颜色破坏第三关的冷色调气质
+  const bellyMat = new THREE.MeshStandardMaterial({ color: 0xb5b9c2, roughness: 0.7 });
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), bellyMat);
+  belly.scale.set(1.1, 0.55, 0.85);
+  belly.position.set(0.02, -0.045, 0);
+  group.add(belly);
+
   const head = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.1, 8), furMat);
   head.rotation.z = -Math.PI / 2;
   head.position.set(0.15, 0.02, 0);
   group.add(head);
+
+  // 三角尖耳朵：狼的经典轮廓特征，比狐狸的耳朵更大更竖直，示意"警觉感"，
+  // 之前完全没有耳朵，是"太简陋"反馈的主因
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.06, 6), furMat);
+    ear.position.set(0.11, 0.085, side * 0.028);
+    ear.rotation.x = side * 0.22;
+    group.add(ear);
+  }
+
   const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffdd44 });
   const eye = new THREE.Mesh(new THREE.SphereGeometry(0.013, 6, 6), eyeMat);
   eye.position.set(0.19, 0.045, 0.025);
   group.add(eye);
+
+  // 尾巴：比狐狸的尾巴更直更细长(狼尾巴不像狐狸那样蓬松上翘，更多是
+  // 笔直下垂)，深色尾尖跟主体毛色区分开
+  const tailTipMat = new THREE.MeshStandardMaterial({ color: 0x3d4046, roughness: 0.75 });
+  const tailBase = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.15, 8), furMat);
+  tailBase.rotation.z = Math.PI / 2.2;
+  tailBase.position.set(-0.16, -0.01, 0);
+  group.add(tailBase);
+  const tailTip = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 6), tailTipMat);
+  tailTip.position.set(-0.23, -0.03, 0);
+  group.add(tailTip);
+
   return group;
 }
 
@@ -1839,12 +1936,19 @@ const LEVEL_ENEMY_CONFIGS = [
     // 同时新增可视化引导轨迹线(见patrolPathGroup/buildPatrolPathVisual)，
     // 玩家现在能直接看到一条连接5个途经点的虚线+小球标记，不用光靠记忆
     // 去预判狐狸下一步往哪走。
+    // 2026-07-11第九轮：加入z(深度)分量，路径从纯x-y平面升级成真正的三维
+    // 路径。z只允许在[TARGET_POS.z, TARGET_POS.z+0.4]之间偏（即只往"离
+    // 玩家更近"的方向偏最多0.4米，绝不允许比TARGET_POS.z更深/更远，避免
+    // 视觉上卡进背板backboard所在的平面），具体推导见README"三维路径
+    // 参数设计"一节——0.4米的深度变化，按典型投掷飞行速度估算，命中判定
+    // 时机(固定在TARGET_POS.z这个平面)跟狐狸实际视觉深度之间的时间差
+    // 在百毫秒量级，判断为可接受。
     waypoints: [
-      { x: 1.3, y: 0.6 },
-      { x: 0.6, y: 0.08 },
-      { x: -0.1, y: 0.65 },
-      { x: -0.8, y: 0.05 },
-      { x: -1.3, y: 0.4 },
+      { x: 1.3, y: 0.6, z: TARGET_POS.z },
+      { x: 0.6, y: 0.08, z: TARGET_POS.z + 0.3 },
+      { x: -0.1, y: 0.65, z: TARGET_POS.z },
+      { x: -0.8, y: 0.05, z: TARGET_POS.z + 0.3 },
+      { x: -1.3, y: 0.4, z: TARGET_POS.z + 0.1 },
     ],
     pauseDuration: 1.3,
     z: TARGET_POS.z,
@@ -1868,12 +1972,22 @@ const LEVEL_ENEMY_CONFIGS = [
     // sprintEnabled的偶尔冲刺机制不受影响——冲刺只是在移动逻辑之外单独
     // 给speed做一次倍率加成，跟"用直线还是用途经点走"是两件互不相干的事，
     // 两套移动模式都能叠加冲刺。
+    // 2026-07-11第九轮：真机反馈第二/三关路线雷同，缺乏差异感，这次三处
+    // 升级：①方向反转——狐狸是右(1.3)→左(-1.3)，狼这次改成左(-1.3)→右
+    // (1.3)，危险区(被保护对象小羊)相应从x=-1.5镜像挪到x=+1.5(见下方
+    // PROTECTED_POS_BY_LEVEL)；②途经点从5个增加到7个，y值多来回摆动
+    // 几次，比狐狸的Z字形更接近连续的S形波浪；③同样加入z(深度)分量，
+    // 且振幅比狐狸略大(最深0.4米，狐狸是0.3米)，呼应"最终关卡"的难度
+    // 递进——z的约束跟狐狸同一套原则：只往离玩家更近的方向偏，不超过
+    // TARGET_POS.z这个上限，避免卡进背板。
     waypoints: [
-      { x: 1.3, y: 0.5 },
-      { x: 0.6, y: 0.1 },
-      { x: -0.1, y: 0.58 },
-      { x: -0.8, y: 0.1 },
-      { x: -1.3, y: 0.38 },
+      { x: -1.3, y: 0.15, z: TARGET_POS.z },
+      { x: -0.87, y: 0.55, z: TARGET_POS.z + 0.35 },
+      { x: -0.43, y: 0.12, z: TARGET_POS.z },
+      { x: 0, y: 0.6, z: TARGET_POS.z + 0.4 },
+      { x: 0.43, y: 0.1, z: TARGET_POS.z + 0.1 },
+      { x: 0.87, y: 0.5, z: TARGET_POS.z + 0.3 },
+      { x: 1.3, y: 0.32, z: TARGET_POS.z },
     ],
     pauseDuration: 1.0, // 比第二关的1.3秒短，停顿窗口更紧一点，呼应"更难"
     z: TARGET_POS.z,
@@ -1882,10 +1996,12 @@ const LEVEL_ENEMY_CONFIGS = [
     sprintEnabled: true, sprintInterval: 4, sprintDuration: 0.8, sprintMultiplier: 2.6,
   },
 ];
+// 2026-07-11第九轮：第三关被保护对象(小羊)从x=-1.5镜像挪到x=+1.5，
+// 配合狼的巡逻方向反转(左→右)，危险区跟着挪到路径的右端终点
 const PROTECTED_POS_BY_LEVEL = [
   null,
   new THREE.Vector3(-1.4, 0.3, TARGET_POS.z),
-  new THREE.Vector3(-1.5, 0.34, TARGET_POS.z),
+  new THREE.Vector3(1.5, 0.34, TARGET_POS.z),
 ];
 
 // ---------- 场景基调切换：森林/农场/更暗的狼谷，色调区分，不做精细美术 ----------

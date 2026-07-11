@@ -1,4 +1,4 @@
-// 通用组件：场景内3D退出VR面板。
+// 通用组件：场景内3D退出VR提示牌 + 专属按键退出。
 //
 // 背景：VRButton默认生成的"EXIT VR"是页面上的DOM按钮，一旦进入沉浸模式，
 // 用户根本看不到浏览器界面，这个按钮实际不可达。三个demo都反馈了同样的
@@ -8,41 +8,40 @@
 // 用法：
 //   import { createXRExitButton } from '../shared/xrExitButton.js';
 //   const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1]);
-//   // 可选：createXRExitButton(renderer, camera, scene, controllers, { position, size })
+//   // 可选：createXRExitButton(renderer, camera, scene, controllers, { position, size, buttonIndex })
 //   // 在animate()里每帧调用一次：
 //   exitButton.update();
 //
-// 交互方式：手柄射线指向面板 + 按抓握键(squeeze/grip)，调用
-// renderer.xr.getSession().end() 优雅退出。2026-07-10改成squeeze——
-// demo-dart的抓取手势从squeeze换成了trigger(select)，这里跟着换成squeeze
-// 才不会互相打架。demo1的trigger(select)绑定的是"切换粒子档位"，逻辑是
-// "不管指哪都会响应"，这里改用squeeze跟它完全不共享按键，也不冲突；
-// demo0没有绑定任何自定义手柄事件，同样安全。
-//
-// 2026-07-11第七轮：真机反馈面板离摄像机太近(原z=-0.55，camera子物体)导致
-// 手柄射线瞄不准，当时的做法是"挪到z=-1.3，同时把尺寸和偏移按同样倍数
-// 放大，维持屏幕视觉大小不变"。
-// 2026-07-11第八轮：用户指出纯粹等距缩放不解决根本问题——面板在视野里
-// 占的角度范围没变，射线覆盖不全的问题还在。这次换思路：面板不再是
-// camera的子物体，而是挂在scene下的世界固定位置，放在跟各demo主要内容
-// (demo0/1的立方体、demo-dart的靶/敌人)差不多的距离范围——这个距离玩家
-// 全程都在用手柄射线/抛物线瞄准那些物体，直接复用同一套已经练熟的瞄准
-// 手感，而不是另外发明一个"UI专属"的距离。默认位置/尺寸适配demo0/demo1
-// 的内容深度(约3.5米)，demo-dart的靶/敌人更远(约4.5米)，通过options自己
-// 传了一组更远、也相应更大的position/size。挂到scene下之后不再需要
-// 每帧camera.updateMatrixWorld()——那是camera子物体时代的产物，面板现在
-// 的世界矩阵由场景图的常规每帧更新维护，不依赖camera。
+// 交互方式的演变：
+//   最早是camera子物体+squeeze瞄准点击(v1)；
+//   2026-07-11第七轮把面板挪远+等比放大，还是camera子物体(v2)；
+//   2026-07-11第八轮放弃等比缩放思路，改成挂到scene下的世界固定位置，
+//   目的是让瞄准角度容差更宽松(v3)；
+//   2026-07-11第九轮(这一版)：真机反馈"瞄准点击"这套交互本身就不如"直接
+//   按一个专属按键"来得简单可靠，改成手柄上一个未被占用的物理按键(默认
+//   buttons[5]，即WebXR"xr-standard"映射里通常对应B/Y的那个按钮)直接
+//   触发session.end()，不再需要任何瞄准/射线检测。既然不再需要瞄准，
+//   第七/八轮"把面板挪远/挪去scene下"的前提也就不存在了——面板改回
+//   camera子物体，回到最初"视野右下角，头转到哪跟到哪"的样式，这对一块
+//   纯展示的说明牌来说反而更合适(不需要专门转头去看靶的方向才能看到它)。
+//   场景内的面板现在只是一块纯展示用的说明牌("按XX键退出VR"的图示)，
+//   不承担任何点击判定，所以也不再需要hover高亮/射线可视化这些逻辑，
+//   代码比之前简单很多。
+//   buttons[5]这个索引沿用的是跟GRAB_BUTTON_INDEX同样的态度——它是WebXR
+//   标准手柄映射的约定值，没有在Pico实机上实测确认过，需要靠调用方
+//   demo里已有的`logGamepadButtonChanges()`(在demo-dart里)按边沿触发
+//   打印实际按下的buttons[i]来验证，如果实测发现B/Y不是索引5，直接改
+//   这里的默认值或者传options.buttonIndex覆盖即可。
 
 import * as THREE from 'three';
 
+// scene参数目前保留只是为了不用改三个demo的调用签名，面板本身现在挂在
+// camera下，不需要scene——纯展示牌不再需要独立于摄像机的世界坐标。
 export function createXRExitButton(renderer, camera, scene, controllers, options = {}) {
-  const WIDTH = options.size ? options.size.width : 0.75;
-  const HEIGHT = options.size ? options.size.height : 0.31;
-
-  // 默认位置对应demo0/demo1的主要内容深度(约z=-1.4，距摄像机约3.5米)，
-  // 放在右侧、略高于视线的位置——不需要跟demo0/1现有内容的确切坐标对齐，
-  // 只要在同一个"玩家已经习惯瞄准"的距离范围内、且不挡住主要内容即可。
-  const WORLD_POS = options.position || new THREE.Vector3(1.1, 1.7, -1.4);
+  const EXIT_BUTTON_INDEX = options.buttonIndex !== undefined ? options.buttonIndex : 5;
+  const WIDTH = options.size ? options.size.width : 0.24;
+  const HEIGHT = options.size ? options.size.height : 0.1;
+  const OFFSET = options.position || new THREE.Vector3(0.32, -0.28, -0.55);
 
   const canvas = document.createElement('canvas');
   canvas.width = 384;
@@ -50,82 +49,75 @@ export function createXRExitButton(renderer, camera, scene, controllers, options
   const ctx = canvas.getContext('2d');
   const texture = new THREE.CanvasTexture(canvas);
 
-  function draw(hovered) {
+  // 纯展示用的说明牌：不再有hover状态，只画一次。图示化的按键图标
+  // (一个圆圈+字母)+文字说明，玩家看一眼就知道按哪个键，不需要瞄准。
+  function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = hovered ? 'rgba(120, 30, 30, 0.9)' : 'rgba(10, 14, 22, 0.75)';
-    ctx.strokeStyle = hovered ? '#ff9f7f' : '#3a4a60';
-    ctx.lineWidth = hovered ? 6 : 3;
+    ctx.fillStyle = 'rgba(10, 14, 22, 0.75)';
+    ctx.strokeStyle = '#3a4a60';
+    ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.roundRect(4, 4, canvas.width - 8, canvas.height - 8, 18);
     ctx.fill();
     ctx.stroke();
 
+    // 按键图标：一个圆圈，里面写字母，示意"这是一个物理按键"
+    const iconCx = 62, iconCy = 80, iconR = 34;
+    ctx.beginPath();
+    ctx.arc(iconCx, iconCy, iconR, 0, Math.PI * 2);
+    ctx.fillStyle = '#3a4a60';
+    ctx.fill();
+    ctx.strokeStyle = '#cfe8ff';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#cfe8ff';
+    ctx.font = 'bold 36px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillStyle = hovered ? '#ffe6df' : '#cfe8ff';
-    ctx.font = 'bold 44px sans-serif';
-    ctx.fillText('退出 VR', canvas.width / 2, 78);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('B', iconCx, iconCy + 2);
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#cfe8ff';
+    ctx.font = 'bold 34px sans-serif';
+    ctx.fillText('退出 VR', 116, 68);
     ctx.font = '22px sans-serif';
-    ctx.fillStyle = hovered ? '#ffcfc0' : '#7f96ac';
-    ctx.fillText('手柄射线指向 + 抓握键', canvas.width / 2, 118);
+    ctx.fillStyle = '#7f96ac';
+    ctx.fillText('按手柄 B/Y 键', 116, 106);
 
     texture.needsUpdate = true;
   }
-  draw(false);
+  draw();
 
   const panel = new THREE.Mesh(
     new THREE.PlaneGeometry(WIDTH, HEIGHT),
     new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false })
   );
-  panel.position.copy(WORLD_POS);
+  panel.position.copy(OFFSET);
   panel.renderOrder = 999;
-  scene.add(panel);
+  camera.add(panel);
 
-  const raycaster = new THREE.Raycaster();
-  const rayOrigin = new THREE.Vector3();
-  const rayDir = new THREE.Vector3();
-  let pendingSqueeze = [];
-  let wasHovered = false;
-
-  controllers.forEach((controller) => {
-    controller.addEventListener('squeezestart', () => {
-      pendingSqueeze.push(controller);
-    });
+  // 独立维护自己的一份inputSource引用，不依赖宿主demo是否也在追踪同一个
+  // controller的connected事件——Object3D支持同一事件多个监听者，互不干扰。
+  const inputSources = [];
+  const prevPressed = [];
+  controllers.forEach((controller, idx) => {
+    controller.addEventListener('connected', (e) => { inputSources[idx] = e.data; });
+    controller.addEventListener('disconnected', () => { inputSources[idx] = null; });
   });
 
-  function controllerHitsPanel(controller) {
-    // controller.matrixWorld本身不会自动保持最新——它是在renderer.render()
-    // 内部随场景遍历才会刷新，而这个检测发生在render()之前，所以这里显式
-    // 强制刷新一次（跟Object3D.getWorldPosition内部做的事一样），否则用的
-    // 是上一帧的手柄位置，头/手一转射线判定就会晚一帧、体感上很飘。
-    controller.updateWorldMatrix(true, false);
-    rayOrigin.setFromMatrixPosition(controller.matrixWorld);
-    rayDir.set(0, 0, -1).transformDirection(controller.matrixWorld);
-    raycaster.set(rayOrigin, rayDir);
-    return raycaster.intersectObject(panel, false).length > 0;
-  }
-
   function update() {
-    let hoveredNow = false;
-    for (const controller of controllers) {
-      if (controllerHitsPanel(controller)) {
-        hoveredNow = true;
-        break;
+    for (let i = 0; i < inputSources.length; i++) {
+      const src = inputSources[i];
+      const gp = src && src.gamepad;
+      if (!gp) continue;
+      const btn = gp.buttons[EXIT_BUTTON_INDEX];
+      if (!btn) continue;
+      const pressed = btn.pressed || btn.value > 0.5;
+      if (pressed && !prevPressed[i]) {
+        const session = renderer.xr.getSession();
+        if (session) session.end();
       }
-    }
-    if (hoveredNow !== wasHovered) {
-      draw(hoveredNow);
-      wasHovered = hoveredNow;
-    }
-
-    if (pendingSqueeze.length > 0) {
-      for (const controller of pendingSqueeze) {
-        if (controllerHitsPanel(controller)) {
-          const session = renderer.xr.getSession();
-          if (session) session.end();
-          break;
-        }
-      }
-      pendingSqueeze = [];
+      prevPressed[i] = pressed;
     }
   }
 
