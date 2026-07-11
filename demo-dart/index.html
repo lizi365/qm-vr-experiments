@@ -975,15 +975,19 @@ function updateAnalogGrabInput() {
 // 停留在z=-0.55。这次跟血量/进度条一起统一挪到z=-1.3。
 // 2026-07-11第十一轮：真机反馈调整后仍然"贴脸"。用Playwright反复核实了
 // 代码/部署/渲染链路(见README"真机反馈第十一轮"一节)，在能验证的范围内
-// 距离数值是正确的(1.3~1.7米，不是贴脸)，怀疑点转向了这块牌子(以及血量)
-// 相对屏幕中心的夹角比进度条大很多(进度条x=0在正中央，没人反馈进度条
-// 贴脸)——原来(0.756,-0.662)算出来离中心视线约37.6°，这次收窄到
-// (0.4,-0.35)，约22.2°，作为一个双重保险(距离和角度都往"更安全"的方向
-// 调)，同时在牌子上加了一行实时计算的距离数字，方便下次真机测试直接
-// 读出真实数值反馈，而不是主观印象。
+// 距离数值是正确的(1.3~1.7米，不是贴脸)，把夹角收窄到约22.2°作为双重
+// 保险，同时加了一行实时计算的距离数字方便下次真机测试直接反馈数值。
+// 2026-07-11第十二轮：用户提供了真机截图，用黄圈标出了世界坐标的得分
+// 面板(`panel`，位置(0,2.35,-2.5))作为已确认距离正确的参照物，要求
+// 退出VR牌统一对齐到相同的z=-2.5——这是世界坐标，不是"离摄像机多远"，
+// 所以改成`worldSpace:true`，牌子挂到scene下(不再是camera子物体)。
+// x/y用跟进度条/血量同一套k=4.7/1.3≈3.6154换算(camera默认位置
+// (0,1.6,2.2)下跟原来camera本地偏移(0.4,-0.35)占据相同的屏幕角度)，
+// 尺寸同样按k倍放大保持视觉大小。
 const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1], {
-  position: new THREE.Vector3(0.4, -0.35, -1.3),
-  size: { width: 0.567, height: 0.236 },
+  position: new THREE.Vector3(1.446, 0.335, -2.5),
+  size: { width: 2.050, height: 0.853 },
+  worldSpace: true,
 });
 
 // ---------- 投掷物选择面板：3个小方块，射线指向+抓握键点击切换 ----------
@@ -1195,17 +1199,24 @@ const heartsTexture = new THREE.CanvasTexture(heartsCanvas);
 // 2026-07-11第十一轮：真机反馈调整后仍然"贴脸"。Playwright反复核实过
 // 代码/部署/渲染链路，距离数值本身确认正确(见README"真机反馈第十一轮"
 // 一节)，怀疑点转向：血量在x=-0.78这个位置离屏幕中心的夹角(约38.6°)
-// 比进度条大得多——进度条中心在x=0(正对视线)，只有边缘才会到类似的
-// 夹角，而血量整块内容都在偏离中心的位置。这次把血量往中心方向收一点
-// (挪到进度条正下方偏左，而不是同一行的左侧)，夹角降到约26.1°，同时
-// 避开跟进度条的垂直重叠(进度条下边缘约y=0.524，血量在这之下)。
+// 比进度条大得多——把血量往中心方向收一点，夹角降到约26.1°。
+// 2026-07-11第十二轮：用户提供了真机截图，用黄圈标出了"得分/FPS"那块
+// 世界坐标面板(`panel`变量，位置在(0,2.35,-2.5)，紧挨着靶心)作为已确认
+// 正确的距离参照物，要求血量/进度条/提示文字/退出VR牌统一对齐到跟它
+// 完全相同的Z坐标(-2.5)，不再用camera子物体+局部z偏移的猜测数值。
+// 这次把血量从camera子物体改成scene子物体(世界坐标)，直接把z设成-2.5，
+// x/y保持跟原来camera本地偏移相同的视觉夹角——用camera默认位置(0,1.6,2.2)
+// 换算：k = 新z深度差(4.7=2.2-(-2.5)) / 旧z深度差(1.3) ≈ 3.6154，
+// 新world.x = 旧local.x*k，新world.y = 1.6 + 旧local.y*k，这样在camera
+// 处于默认姿态时跟以前占据的屏幕角度完全一致，只是挪到了跟参照面板
+// 相同的深度。几何尺寸也按同样的k倍数放大，保持视觉大小不变。
 const heartsMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.3545, 0.1182),
+  new THREE.PlaneGeometry(1.282, 0.4274),
   new THREE.MeshBasicMaterial({ map: heartsTexture, transparent: true, depthTest: false })
 );
-heartsMesh.position.set(-0.45, 0.45, -1.3);
+heartsMesh.position.set(-1.627, 3.227, -2.5);
 heartsMesh.renderOrder = 999;
-camera.add(heartsMesh);
+scene.add(heartsMesh);
 
 // 用贝塞尔曲线画一个简单的心形，不依赖emoji字体渲染（不同头显/浏览器对
 // emoji字体的支持不一致，自己画的形状更可控）
@@ -1334,20 +1345,20 @@ progressCanvas.height = 140;
 const progressCtx = progressCanvas.getContext('2d');
 const progressTexture = new THREE.CanvasTexture(progressCanvas);
 // 2026-07-11第十轮：真机反馈进度条(连带血量)离眼睛太近、贴脸看不清——
-// 这块一直是z=-0.55(camera子物体)，从来没有跟着第七轮的"远距离"调整走。
-// 这次统一挪到z=-1.3，跟第七轮物品选择面板/退出按钮用过的距离量级一致
-// (当时的SELECT_PANEL_OFFSET/退出按钮OFFSET都是z=-1.3)，几何尺寸和x/y
-// 偏移都按同样的倍数(1.3/0.55≈2.364)放大，保持视觉大小/屏幕位置基本
-// 不变，只是把整块面板挪远。因为是纯只读展示（不需要瞄准），这次沿用
-// 第七轮"等比放大"的思路完全没问题——"等比缩放不解决瞄准角度容差"的
-// 教训只适用于需要射线点击的交互面板，不适用于只是要"看得清楚"的展示牌。
+// 挪到z=-1.3，跟第七轮物品选择面板/退出按钮用过的距离量级一致，几何
+// 尺寸和x/y偏移都按同样的倍数(1.3/0.55≈2.364)放大。
+// 2026-07-11第十二轮：用户截图用黄圈标出了世界坐标的得分面板(`panel`，
+// 位置(0,2.35,-2.5))作为已确认正确的距离参照，要求进度条统一对齐到
+// 相同的z=-2.5。改成scene子物体(世界坐标)，x/y用跟heartsMesh同一套
+// k=4.7/1.3≈3.6154的换算(camera默认位置(0,1.6,2.2)下，跟原来camera本地
+// 偏移占据相同的屏幕角度)，几何尺寸同样按k倍放大保持视觉大小。
 const progressMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(1.182, 0.324),
+  new THREE.PlaneGeometry(4.274, 1.171),
   new THREE.MeshBasicMaterial({ map: progressTexture, transparent: true, depthTest: false })
 );
-progressMesh.position.set(0, 0.686, -1.3);
+progressMesh.position.set(0, 4.080, -2.5);
 progressMesh.renderOrder = 999;
-camera.add(progressMesh);
+scene.add(progressMesh);
 
 function drawProgressBar() {
   const ctx = progressCtx;
@@ -2416,14 +2427,16 @@ hintCanvas.width = 512;
 hintCanvas.height = 60;
 const hintCtx = hintCanvas.getContext('2d');
 const hintTexture = new THREE.CanvasTexture(hintCanvas);
-// 2026-07-11第十轮：跟着进度条一起挪到z=-1.3，同样按1.3/0.55≈2.364倍放大
+// 2026-07-11第十轮：跟着进度条一起挪到z=-1.3。
+// 2026-07-11第十二轮：跟进度条/血量一起对齐到黄圈参照面板的z=-2.5，
+// 同一套k=3.6154换算，改成scene子物体(世界坐标)。
 const hintMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(1.182, 0.1385),
+  new THREE.PlaneGeometry(4.274, 0.5008),
   new THREE.MeshBasicMaterial({ map: hintTexture, transparent: true, depthTest: false })
 );
-hintMesh.position.set(0, 0.4136, -1.3); // 紧贴在新位置的进度条下方，避免重叠
+hintMesh.position.set(0, 3.095, -2.5); // 紧贴在新位置的进度条下方，避免重叠
 hintMesh.renderOrder = 999;
-camera.add(hintMesh);
+scene.add(hintMesh);
 
 function drawHintText() {
   const ctx = hintCtx;

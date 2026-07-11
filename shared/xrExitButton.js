@@ -8,7 +8,9 @@
 // 用法：
 //   import { createXRExitButton } from '../shared/xrExitButton.js';
 //   const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1]);
-//   // 可选：createXRExitButton(renderer, camera, scene, controllers, { position, size, buttonIndex })
+//   // 可选：createXRExitButton(renderer, camera, scene, controllers, { position, size, buttonIndex, worldSpace })
+//   // worldSpace=true时position是世界坐标、面板挂在scene下；默认(false/不传)
+//   // 时position是相对camera的偏移量、面板挂在camera下(第九轮定下来的默认样式)。
 //   // 在animate()里每帧调用一次：
 //   exitButton.update();
 //
@@ -35,13 +37,20 @@
 
 import * as THREE from 'three';
 
-// scene参数目前保留只是为了不用改三个demo的调用签名，面板本身现在挂在
-// camera下，不需要scene——纯展示牌不再需要独立于摄像机的世界坐标。
+// 2026-07-11第十二轮：demo-dart这边用户提供了真机截图，用一块已确认距离
+// 正确的世界坐标参照面板(靶心旁边的得分/FPS面板)要求把退出VR牌也对齐
+// 到相同的z深度——这个深度是世界坐标，不是"离摄像机多远"这种相对值，
+// 所以面板不能再是camera子物体，得挂回scene下的世界固定位置。但demo0/
+// demo1没有这个"参照面板"场景，它们不传position/size，应该维持第九轮
+// 定下来的camera子物体+视野右下角样式不变。用新增的options.worldSpace
+// (默认false)区分这两种模式：worldSpace为true时挂到scene下、position
+// 当成世界坐标；默认(false)维持camera子物体、position当成相对偏移量。
 export function createXRExitButton(renderer, camera, scene, controllers, options = {}) {
   const EXIT_BUTTON_INDEX = options.buttonIndex !== undefined ? options.buttonIndex : 5;
   const WIDTH = options.size ? options.size.width : 0.24;
   const HEIGHT = options.size ? options.size.height : 0.1;
   const OFFSET = options.position || new THREE.Vector3(0.32, -0.28, -0.55);
+  const WORLD_SPACE = !!options.worldSpace;
 
   const canvas = document.createElement('canvas');
   canvas.width = 384;
@@ -131,7 +140,11 @@ export function createXRExitButton(renderer, camera, scene, controllers, options
   );
   panel.position.copy(OFFSET);
   panel.renderOrder = 999;
-  camera.add(panel);
+  if (WORLD_SPACE) {
+    scene.add(panel);
+  } else {
+    camera.add(panel);
+  }
 
   // 独立维护自己的一份inputSource引用，不依赖宿主demo是否也在追踪同一个
   // controller的connected事件——Object3D支持同一事件多个监听者，互不干扰。
