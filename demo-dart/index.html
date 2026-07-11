@@ -537,6 +537,123 @@ function playAxeHitSound() {
   playNoiseBurst(0.08, 0.14);
 }
 
+// ========== 背景音乐实验（2026-07-10）：纯Web Audio振荡器合成，独立实验 ==========
+// 目的是评估"纯合成音乐能不能达到可用质感"，不够的话后续换外部音频文件。
+// 不碰任何已有的游戏逻辑/物理常量/碰撞检测，只新增这一块+一个场景内开关面板。
+//
+// 设计思路：不用"循环一段音频buffer"的做法（容易有接缝感，纯合成也没有
+// 现成buffer可循环），而是两层叠加：
+//   1) 持续的低音drone（A2主音+E3五度，纯正弦，叠加极慢的LFO做音量的"呼吸感"）
+//      ——振荡器本身就是连续信号，只要不重新触发就永远不会有"循环"这回事，
+//      天然没有接缝问题。
+//   2) 一条稀疏的旋律线，用look-ahead scheduler（跟鼓机/音序器同样的标准做法：
+//      提前一小段时间用ctx.currentTime精确排定下一批音符的起始时间，而不是
+//      用setInterval硬等，避免JS主线程卡顿导致的音符错拍）在A小调五声音阶
+//      (A-C-D-E-G，比自然小调少了容易"刺耳"的B/F，更贴合舒缓氛围)上按固定
+//      pattern数组循环触发，pattern本身循环导致的是"旋律重复"，不是"音频
+//      接缝"，听感上不会有跳变感。
+const MUSIC_SCALE_FREQ = { A3: 220.00, C4: 261.63, D4: 293.66, E4: 329.63, G4: 392.00 };
+// 32步 = 4小节(每小节8步/八分音符)，大量休止(null)保持稀疏舒缓，避免"游戏
+// 通关配乐"那种密集感——这只是一次快速实验，作曲复杂度故意做得很简单
+const MUSIC_PATTERN = [
+  'A3', null, null, null, 'C4', null, null, null,
+  null, null, 'D4', null, null, null, null, null,
+  'E4', null, null, null, 'D4', null, 'C4', null,
+  null, null, null, null, 'A3', null, null, null,
+];
+const MUSIC_BPM = 66; // 舒缓的慢速
+const MUSIC_STEP_DURATION = 60 / MUSIC_BPM / 2; // 八分音符时值
+const MUSIC_TARGET_GAIN = 0.03; // 总线音量上限——功能性音效的gain普遍在0.15~0.32
+// 量级，这里刻意压得很低，保证背景音乐"铺垫"而不是"抢戏"
+
+let musicGainNode = null;
+let musicStarted = false;
+let musicEnabled = false;
+let musicStepIndex = 0;
+let musicNextStepTime = 0;
+let musicSchedulerHandle = null;
+
+function playMusicNote(freq, startTime) {
+  const ctx = ensureAudio();
+  const osc = ctx.createOscillator();
+  osc.type = 'triangle'; // 比sine略有泛音、比square柔和，适合柔和的旋律音色
+  osc.frequency.value = freq;
+  const g = ctx.createGain();
+  const noteLen = MUSIC_STEP_DURATION * 3; // 拖长到3步时值再衰减完，制造音符之间
+  // 轻微重叠的legato感，避免每个音符都"断"得很干净、显得机械
+  g.gain.setValueAtTime(0, startTime);
+  g.gain.linearRampToValueAtTime(0.5, startTime + 0.18); // 慢起振，柔和不突兀
+  g.gain.linearRampToValueAtTime(0, startTime + noteLen);
+  osc.connect(g).connect(musicGainNode);
+  osc.start(startTime);
+  osc.stop(startTime + noteLen + 0.05);
+}
+
+function scheduleMusicSteps() {
+  const ctx = ensureAudio();
+  // look-ahead: 提前0.15秒把落在这个窗口内的音符排好，每100ms检查一次，
+  // 是鼓机/音序器常见的调度节奏，比"到点才现算"更抗主线程卡顿
+  while (musicNextStepTime < ctx.currentTime + 0.15) {
+    const note = MUSIC_PATTERN[musicStepIndex % MUSIC_PATTERN.length];
+    if (note) playMusicNote(MUSIC_SCALE_FREQ[note], musicNextStepTime);
+    musicStepIndex++;
+    musicNextStepTime += MUSIC_STEP_DURATION;
+  }
+  musicSchedulerHandle = setTimeout(scheduleMusicSteps, 100);
+}
+
+function startDrone() {
+  const ctx = ensureAudio();
+  const droneVoices = [
+    { freq: 110.00, gain: 0.5 }, // A2 主音
+    { freq: 164.81, gain: 0.28 }, // E3 五度
+  ];
+  for (const voice of droneVoices) {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = voice.freq;
+    const g = ctx.createGain();
+    g.gain.value = voice.gain;
+    // 极慢的LFO(周期约12~20秒)微调音量，模拟森林低鸣的"呼吸感"，避免
+    // 死板的纯持续音——LFO本身也是连续信号，同样不存在循环接缝的问题
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.05 + Math.random() * 0.03;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = voice.gain * 0.15;
+    lfo.connect(lfoGain).connect(g.gain);
+    lfo.start();
+    osc.connect(g).connect(musicGainNode);
+    osc.start();
+  }
+}
+
+// 只在真正需要发声时才创建/启动这些持续运行的振荡器节点（drone+调度器），
+// 避免demo一加载就有一堆常驻振荡器在跑；用户没打开音乐开关之前不会调用这个
+function startMusicIfNeeded() {
+  if (musicStarted) return;
+  musicStarted = true;
+  const ctx = ensureAudio();
+  musicGainNode = ctx.createGain();
+  musicGainNode.gain.value = 0; // 从静音开始，toggle时再淡入，避免一启动就突兀地砰一声
+  musicGainNode.connect(ctx.destination);
+  startDrone();
+  musicNextStepTime = ctx.currentTime + 0.1;
+  scheduleMusicSteps();
+}
+
+function setMusicEnabled(enabled) {
+  musicEnabled = enabled;
+  startMusicIfNeeded();
+  const ctx = ensureAudio();
+  musicGainNode.gain.cancelScheduledValues(ctx.currentTime);
+  musicGainNode.gain.setValueAtTime(musicGainNode.gain.value, ctx.currentTime);
+  // 0.8秒渐入/渐出，而不是直接跳变到目标音量，开关切换瞬间不会有突兀的
+  // "啪"一下——这跟功能性音效追求的"快速起振"是相反的设计意图，背景音乐
+  // 要的是不打断沉浸感
+  musicGainNode.gain.linearRampToValueAtTime(enabled ? MUSIC_TARGET_GAIN : 0, ctx.currentTime + 0.8);
+}
+
 // ---------- 命中评级文字：Canvas贴图 + 简单缩放动画，参考街机投掷类游戏的即时反馈 ----------
 // 只有中高分段（6/8/10）才弹字，2/4分和脱靶只有命中标记点，不额外加文字，
 // 避免每次投掷都弹一堆文字导致视觉噪音，把"炸裂反馈"留给真正打得好的时候。
@@ -826,9 +943,13 @@ const exitButton = createXRExitButton(renderer, camera, [controller0, controller
 // 按钮在用，而这个面板放在视野左下方（退出按钮在右下方），两块面板离得
 // 够开，同一根射线不会同时扫到两个，不会互相误触。这是一个跟你原话不
 // 完全一致的实现决定，写在这里说明原因，README里也会提一句。
-const SELECT_PANEL_OFFSET = new THREE.Vector3(-0.34, -0.20, -0.55);
-const OPTION_SIZE = 0.09;
-const OPTION_GAP = 0.014;
+// 2026-07-11：真机反馈这块面板离摄像机太近(原z=-0.55)，手柄射线角度
+// 容差太窄导致瞄不准——道理跟shared/xrExitButton.js里的说明完全一样，
+// 这里同样按1.3/0.55≈2.364的倍数把距离和尺寸一起放大，挪到z=-1.3，
+// 视觉大小/屏幕位置基本不变，只是给手柄换来更宽松的瞄准角度。
+const SELECT_PANEL_OFFSET = new THREE.Vector3(-0.804, -0.473, -1.3);
+const OPTION_SIZE = 0.213;
+const OPTION_GAP = 0.033;
 
 const selectPanelGroup = new THREE.Group();
 selectPanelGroup.position.copy(SELECT_PANEL_OFFSET);
@@ -1316,8 +1437,10 @@ function setupEnemyLevel(enemyGrp, protectedGrp, config) {
   enemyPauseTimer = 0;
   enemyBobPhase = 0;
   if (config.waypoints) {
-    // 途经点模式(目前第二关狐狸用)：从第一个途经点(约定为远端/安全端)出发
-    enemyGroup.position.set(config.waypoints[0], config.y, config.z);
+    // 途经点模式(目前第二关狐狸用)：从第一个途经点(约定为远端/安全端)出发。
+    // 途经点是{x,y}对，不是单纯的x数值——见下方updateWaypointMovement的说明
+    const wp0 = config.waypoints[0];
+    enemyGroup.position.set(wp0.x, wp0.y, config.z);
   } else {
     // 保护对象放在pathMinX那一侧(danger zone)，敌人要从pathMaxX(远端/安全端)
     // 出发、朝pathMinX移动，玩家才有一段完整的巡逻时间可以反应。之前这里
@@ -1355,7 +1478,8 @@ function updateEnemy(dt) {
       enemyWaypointIndex = 0;
       enemyPauseTimer = 0;
       if (enemyConfig.waypoints) {
-        enemyGroup.position.set(enemyConfig.waypoints[0], enemyConfig.y, enemyConfig.z);
+        const wp0 = enemyConfig.waypoints[0];
+        enemyGroup.position.set(wp0.x, wp0.y, enemyConfig.z);
       } else {
         // 重生也要回到远端(pathMaxX)重新出发，跟setupEnemyLevel同样的道理，
         // 不能直接生成在危险区里
@@ -1409,29 +1533,44 @@ function updateEnemy(dt) {
 // 往复。全程严格按预设顺序走，不引入任何随机性——可预测性本身就是这类
 // 小游戏的乐趣来源(红白机式设计)，随机移动只会让玩家觉得"不公平"而不是
 // "有意思"，2026-07-10按用户明确要求做成这样，不做随机版本。
+//
+// 2026-07-11修正：途经点现在是{x,y}对，同时插值x和y两个方向——上一版
+// 只让x变化(y全程固定在config.y)，本质上仍然是一条直线，只是加了停顿，
+// 之前用"x坐标随时间变化"的采样验证只证明了停顿节奏，没有验证路径的
+// 视觉形态是不是直线，这是上一轮验证方法本身的疏漏。这次改成2D插值
+// (Math.hypot算总距离，按比例同时移动x/y分量)，才能真正走出Z字形/S形
+// 路径。z坐标继续固定在config.z(=TARGET_POS.z)不变——tryHitEnemy和
+// 扣命判定(dangerDistance)都只比较x/y，从没用过z，所以只在x/y平面内
+// 绕路不会影响任何命中/受伤逻辑，也不会让狐狸跟穿越靶平面的番茄的
+// 碰撞检测产生视觉/数值不一致（如果贸然改z，番茄命中的判定平面和
+// 狐狸的视觉深度就会脱节，那样会更奇怪，所以特意只在x/y内绕）。
 function updateWaypointMovement(dt, speed) {
   const wp = enemyConfig.waypoints;
-  const targetX = wp[enemyWaypointIndex];
+  const target = wp[enemyWaypointIndex];
 
   if (enemyPauseTimer > 0) {
     enemyPauseTimer -= dt;
     enemyBobPhase += dt * 6;
-    enemyGroup.position.y = enemyConfig.y + Math.sin(enemyBobPhase) * 0.025;
+    enemyGroup.position.y = target.y + Math.sin(enemyBobPhase) * 0.025;
     if (enemyPauseTimer <= 0) {
-      enemyGroup.position.y = enemyConfig.y;
+      enemyGroup.position.y = target.y;
       enemyWaypointIndex = (enemyWaypointIndex + 1) % wp.length;
     }
     return;
   }
 
-  const dx = targetX - enemyGroup.position.x;
+  const dx = target.x - enemyGroup.position.x;
+  const dy = target.y - enemyGroup.position.y;
+  const dist = Math.hypot(dx, dy);
   const step = speed * dt;
-  if (Math.abs(dx) <= step) {
-    enemyGroup.position.x = targetX;
+  if (dist <= step) {
+    enemyGroup.position.x = target.x;
+    enemyGroup.position.y = target.y;
     enemyPauseTimer = enemyConfig.pauseDuration || 0;
     enemyBobPhase = 0;
   } else {
-    enemyGroup.position.x += Math.sign(dx) * step;
+    enemyGroup.position.x += (dx / dist) * step;
+    enemyGroup.position.y += (dy / dist) * step;
   }
 }
 
@@ -1564,7 +1703,10 @@ function buildLamb() {
 
 function buildWolf() {
   const group = new THREE.Group();
-  const furMat = new THREE.MeshStandardMaterial({ color: 0x565a5e, roughness: 0.75 });
+  // 2026-07-11：颜色从0x565a5e调亮到0x767b81——第三关本身光照就偏暗，
+  // 原来这个中灰在昏暗环境光下几乎跟阴影融为一体，调亮之后跟"更暗更冷"
+  // 的场景基调仍然协调(灰色系没变，只是提亮)，但不再糊成一团黑影
+  const furMat = new THREE.MeshStandardMaterial({ color: 0x767b81, roughness: 0.75 });
   const body = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), furMat);
   body.scale.set(1.4, 0.9, 1);
   group.add(body);
@@ -1599,17 +1741,30 @@ scene.add(wolfGroup);
 const ENEMY_HIT_SCORE = 8; // 命中敌人算固定分值，够格触发连击(>=6)，也够格弹"GREAT!"评级文字
 const LEVEL_ENEMY_CONFIGS = [
   null,
-  { // 第二关：狐狸——途经点巡逻+停留模式(2026-07-10改版)。原来是两点间
-    // 匀速直线往返，路径短(2.4m)+从不停留，玩家反应窗口极短，一不留神
-    // 整个来回就错过了，也是"手都酸了还进不了第三关"的一部分原因。改成
-    // 5个途经点、每点停留1.3秒(带小跳动待机动画)，路径拉长到2.6m，从
-    // "一闪而过"变成"移动-停顿-移动"的节奏——停顿时是完整的静止瞄准
-    // 窗口，命中率应该明显提升，同时保持100%确定性路线(不引入随机)。
-    // hitRadius比默认的0.18m放宽到0.24m，配合途经点停顿双重降低难度。
-    waypoints: [1.3, 0.6, -0.1, -0.8, -1.3],
+  { // 第二关：狐狸——途经点巡逻+停留模式。
+    // 2026-07-10第六轮：原来是两点间匀速直线往返，路径短(2.4m)+从不停留，
+    // 改成5个途经点+每点停留1.3秒。
+    // 2026-07-11第七轮修正：上一轮的5个"途经点"实际上只让x变化、y全程固定
+    // 在0.32，本质上仍然是一条直线，只是加了几个停顿——真机实测确认了
+    // 这一点，也确认了这不是部署/缓存滞后问题（部署的commit核对过是对的）。
+    // 上一轮的"位置采样"验证只证明了停顿节奏，没有验证路径的视觉形态，
+    // 是验证方法本身的疏漏。这次把途经点改成{x,y}对，y在0.15~0.5之间
+    // 大幅摆动，才是真正意义上的Z字形路径，见updateWaypointMovement()里
+    // 的插值实现和上面的说明。
+    waypoints: [
+      { x: 1.3, y: 0.45 },
+      { x: 0.6, y: 0.15 },
+      { x: -0.1, y: 0.5 },
+      { x: -0.8, y: 0.15 },
+      { x: -1.3, y: 0.35 },
+    ],
     pauseDuration: 1.3,
-    y: 0.32, z: TARGET_POS.z,
-    baseSpeed: 0.42, dangerDistance: 0.25, hitRadius: 0.24,
+    z: TARGET_POS.z,
+    // hitRadius：第六轮从默认0.18m放宽到0.24m；这一轮真机反馈命中判定
+    // 体积"再放大一倍"，是在第六轮定下来的0.24m基础上乘以2，不是从最初
+    // 的0.18m算起——0.24 x 2 = 0.48m，明确写清楚避免跟上一次的调整幅度
+    // 混淆
+    baseSpeed: 0.42, dangerDistance: 0.25, hitRadius: 0.48,
     speedRampInterval: 20, speedRampAmount: 0.08,
   },
   { // 第三关：狼——固定基础速度，但每4秒有一次0.8秒的冲刺(2.6倍速)
@@ -1637,9 +1792,21 @@ const LEVEL_THEMES = [
     pointColor: 0xfff2c0, pointIntensity: 2.2, showTrees: false,
   },
   { // 第三关：更暗更冷，呼应"更高难度"的直觉暗示
-    bg: 0x05060c, fogNear: 1.8, fogFar: 7, groundTint: 0x3a3a4c,
-    ambientColor: 0x1a1a2a, ambientIntensity: 0.4,
-    pointColor: 0x8a9aff, pointIntensity: 1.2, showTrees: false,
+    // 2026-07-11：真机反馈"几乎完全漆黑，什么都看不清"——不是灯光对象
+    // 丢失/被清理逻辑误删（ambient/point是全局唯一实例，enterLevel每次
+    // 只是改它们的.color/.intensity，从来没有remove过，这条排查过了排除
+    // 掉了），是这一档数值本身定得太极端。第一次尝试(ambientIntensity
+    // 0.4→0.7、pointIntensity1.2→2.0)用Playwright截图+对狼实际渲染位置
+    // 做了裁剪+亮度采样验证，发现只是"没那么黑"，狼的轮廓依然基本融进
+    // 背景里，不够格——所以又加了第二次调整：ambientIntensity再提到1.3、
+    // pointIntensity再提到3.5，同时把狼的毛色从0x565a5e(中灰，在暗光下
+    // 几乎跟阴影同色)调亮到0x767b81，三处一起调之后裁剪截图确认狼的
+    // 轮廓/眼睛都能看清楚。fogNear/Far从原来的1.8/7放宽到3/11，比第二关
+    // 的3/12略紧一点点，保留了"视野更受限"的差异化，但不再断崖式收紧。
+    // 小羊(0xebe6da近白)材质本身没有问题，不需要改。
+    bg: 0x0a0d16, fogNear: 3, fogFar: 11, groundTint: 0x4a4a5e,
+    ambientColor: 0x33344a, ambientIntensity: 1.3,
+    pointColor: 0x8a9aff, pointIntensity: 3.5, showTrees: false,
   },
 ];
 

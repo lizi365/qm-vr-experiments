@@ -21,14 +21,23 @@
 import * as THREE from 'three';
 
 export function createXRExitButton(renderer, camera, controllers) {
-  const WIDTH = 0.24;
-  const HEIGHT = 0.1;
+  // 2026-07-11：真机反馈"手柄射线完全无法瞄准"这一批面板都离摄像机太近
+  // (原来z=-0.55，不到0.6米)——面板是camera子物体，跟头一起动，但手柄
+  // 位置是独立6DOF追踪的，离头有一段真实的物理距离；面板离头越近，手柄
+  // 射线要精确对上它所需要的角度窗口就越窄，稍微一偏手就完全指不到。
+  // 常见WebXR UI面板经验值是放在1-2米这个区间，这里选1.3米。WIDTH/HEIGHT
+  // 和OFFSET的x/y都按跟原来相同的倍数(1.3/0.55≈2.364)放大，这样从摄像机
+  // 看过去的视觉大小/屏幕位置基本不变，只是把面板本身挪远了，纯粹是为了
+  // 换取手柄更宽松的瞄准角度容差。这一项没有真机条件验证，1.3米是否
+  // 合适需要下一轮真机测试确认，见demo-dart的README。
+  const WIDTH = 0.567;
+  const HEIGHT = 0.236;
 
   // 面板挂在摄像机下面，作为camera的子物体——camera的世界矩阵在VR里由
   // renderer.xr每帧自动同步成头显姿态，子物体自然跟着头动，不用自己每帧
   // 手动copy位置/朝向。位置选在视野右下方外侧：平时正常看东西不会碰到，
   // 但只要稍微低头/瞟一眼右下就能看到，符合"不容易误触但能主动看到"的要求。
-  const OFFSET = new THREE.Vector3(0.32, -0.28, -0.55);
+  const OFFSET = new THREE.Vector3(0.756, -0.662, -1.3);
 
   const canvas = document.createElement('canvas');
   canvas.width = 384;
