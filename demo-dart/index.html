@@ -277,27 +277,54 @@ function buildAxe() {
   const handle = new THREE.Mesh(handleGeo, handleMat);
   group.add(handle);
 
-  const bladeMat = new THREE.MeshStandardMaterial({
-    color: 0xaab0b8, metalness: 0.7, roughness: 0.3,
-    emissive: 0x2a3a44, emissiveIntensity: BASE_HINT_EMISSIVE,
+  // 2026-07-11第十一轮：参考原始部落石斧重新设计。上一版(第十轮)是规整
+  // 的扁平楔形金属片，真机反馈"造型还是奇怪"——问题是太规整、太光滑，
+  // 看不出"石头"的粗粝感，也没有石斧标志性的"一侧薄刃、一侧厚重"不对称
+  // 轮廓。这次用两块大小不同、朝向略有偏转的低多边形楔形("主石片"+一块
+  // 补充的"崩裂碎块")拼出不规则的石块轮廓；配色换成灰褐色的石头质感
+  // (去掉上一版的金属高光metalness，roughness拉到接近1，加flatShading
+  // 让棱角分明、呼应"打制石器"的粗糙感而不是精加工的光滑感)；另外在
+  // 手柄和石斧头结合处加了一圈深色圆环，示意缠绳绑缚固定的细节。
+  const stoneMat = new THREE.MeshStandardMaterial({
+    color: 0x6e675c, roughness: 0.95, flatShading: true,
+    emissive: 0x3a3830, emissiveIntensity: BASE_HINT_EMISSIVE,
   });
-  // 2026-07-11第十轮：原来的4棱锥(ConeGeometry)对称扣在手柄正前方，宽半径
-  // (0.045)比手柄半径(0.008)大很多，看起来就是"细杆+圆润的伞状顶"——
-  // 真机反馈"像个小蘑菇"。改用CylinderGeometry(窄一端贴手柄，宽一端是
-  // 刃口，3棱柱压扁成薄片)，并且不再跟手柄同轴对称，而是偏移到手柄前端
-  // 的一侧，模拟真斧头"刃口贴在柄侧面"的不对称轮廓，而不是柄顶端正中央
-  // 堆一个对称的锥形。
-  const bladeGeo = new THREE.CylinderGeometry(0.006, 0.052, 0.075, 3, 1);
-  // 默认圆柱轴向是本地Y(radiusTop在+Y端，radiusBottom在-Y端)；绕Z轴转90°后，
-  // "窄→宽"这个方向从纵向变成横向，宽的一端(刃口)朝侧边伸出去，不再朝前
-  bladeGeo.rotateZ(Math.PI / 2);
-  bladeGeo.scale(1, 1, 0.22); // 沿厚度方向大幅压扁，做出扁平的刃状而不是厚实的楔块
-  const blade = new THREE.Mesh(bladeGeo, bladeMat);
-  blade.position.set(0.018, 0, -0.065); // 手柄前端、偏向一侧，制造不对称的"刃贴柄侧"造型
-  blade.rotation.z = Math.PI / 12; // 轻微倾斜，增加一点劈砍姿态的动感
-  group.add(blade);
 
-  return { group, hintMat: bladeMat };
+  // 主体石块：用IcosahedronGeometry(20面体)做底形——本身就是低多边形、
+  // 棱角分明的不规则块状，比压扁的圆锥更容易读成"一块石头"而不是"一片
+  // 薄刀刃"。拉长+压扁做出楔形轮廓，但保留足够的厚度（不压得跟纸片一样
+  // 薄），一侧(局部+X，刃口方向)相对薄、另一侧(靠手柄这端)相对厚重，
+  // 制造"一侧薄刃一侧厚重"的不对称轮廓
+  const mainGeo = new THREE.IcosahedronGeometry(0.048, 0);
+  mainGeo.scale(1.5, 0.62, 0.55); // 拉长(刃口方向)+适度压扁，保留厚度感
+  mainGeo.translate(0.012, 0, 0); // 把体积中心往刃口方向偏，厚重端留在手柄一侧
+  const mainStone = new THREE.Mesh(mainGeo, stoneMat);
+  mainStone.position.set(0.028, 0.012, -0.075);
+  mainStone.rotation.z = -0.16;
+  mainStone.rotation.y = 0.18;
+  group.add(mainStone);
+
+  // 补一块不规则的小突起，打破太规整的对称感，模拟手工打制石器边缘的
+  // 崩裂痕迹——真实石斧的轮廓从来不是完美的几何体，同样用20面体保持
+  // "石块感"而不是"薄片感"
+  const chipGeo = new THREE.IcosahedronGeometry(0.026, 0);
+  chipGeo.scale(1.3, 0.65, 0.6);
+  const chip = new THREE.Mesh(chipGeo, stoneMat);
+  chip.position.set(0.008, -0.02, -0.055);
+  chip.rotation.z = 0.4;
+  chip.rotation.x = 0.45;
+  chip.rotation.y = -0.3;
+  group.add(chip);
+
+  // 缠绳细节：深色圆环套在手柄上、贴着石斧头根部，暗示绳索捆绑固定
+  // 石斧头的原始工艺——TorusGeometry默认的圆环朝向(法线沿本地Z)正好
+  // 跟手柄的轴向一致，不需要额外旋转就能"套"在手柄上
+  const bindingMat = new THREE.MeshStandardMaterial({ color: 0x3a2a18, roughness: 0.9 });
+  const binding = new THREE.Mesh(new THREE.TorusGeometry(0.014, 0.005, 6, 10), bindingMat);
+  binding.position.set(0, 0, -0.048);
+  group.add(binding);
+
+  return { group, hintMat: stoneMat };
 }
 
 // ---------- 投掷物类型配置：外观/尾焰颜色/命中反馈都从这里查 ----------
@@ -945,11 +972,17 @@ function updateAnalogGrabInput() {
 // 顶部说明)，不再需要瞄准点击，牌子改回camera子物体、视野右下角的样式。
 // 2026-07-11第十轮：真机反馈这块牌子(以及血量/进度条)距离眼睛太近、
 // 贴脸看不清——第九轮虽然把位置改对了，但漏了"距离"这个维度，牌子还
-// 停留在z=-0.55。这次跟血量/进度条一起统一挪到z=-1.3(重新用回第七轮
-// 物品选择面板/退出按钮验证过的距离量级)，尺寸/偏移按1.3/0.55≈2.364
-// 倍放大，跟第七轮当时的具体数值一致(0.756,-0.662,-1.3 / 0.567×0.236m)。
+// 停留在z=-0.55。这次跟血量/进度条一起统一挪到z=-1.3。
+// 2026-07-11第十一轮：真机反馈调整后仍然"贴脸"。用Playwright反复核实了
+// 代码/部署/渲染链路(见README"真机反馈第十一轮"一节)，在能验证的范围内
+// 距离数值是正确的(1.3~1.7米，不是贴脸)，怀疑点转向了这块牌子(以及血量)
+// 相对屏幕中心的夹角比进度条大很多(进度条x=0在正中央，没人反馈进度条
+// 贴脸)——原来(0.756,-0.662)算出来离中心视线约37.6°，这次收窄到
+// (0.4,-0.35)，约22.2°，作为一个双重保险(距离和角度都往"更安全"的方向
+// 调)，同时在牌子上加了一行实时计算的距离数字，方便下次真机测试直接
+// 读出真实数值反馈，而不是主观印象。
 const exitButton = createXRExitButton(renderer, camera, scene, [controller0, controller1], {
-  position: new THREE.Vector3(0.756, -0.662, -1.3),
+  position: new THREE.Vector3(0.4, -0.35, -1.3),
   size: { width: 0.567, height: 0.236 },
 });
 
@@ -1159,11 +1192,18 @@ const heartsTexture = new THREE.CanvasTexture(heartsCanvas);
 // "位置"，没对齐"距离"，两者(血量+进度条)仍然停留在z=-0.55。这次两个
 // 一起挪到z=-1.3(见progressMesh的说明)，尺寸/偏移同样按1.3/0.55≈2.364
 // 的倍数放大，跟进度条保持同一距离、同一竖直高度，紧邻在它左侧。
+// 2026-07-11第十一轮：真机反馈调整后仍然"贴脸"。Playwright反复核实过
+// 代码/部署/渲染链路，距离数值本身确认正确(见README"真机反馈第十一轮"
+// 一节)，怀疑点转向：血量在x=-0.78这个位置离屏幕中心的夹角(约38.6°)
+// 比进度条大得多——进度条中心在x=0(正对视线)，只有边缘才会到类似的
+// 夹角，而血量整块内容都在偏离中心的位置。这次把血量往中心方向收一点
+// (挪到进度条正下方偏左，而不是同一行的左侧)，夹角降到约26.1°，同时
+// 避开跟进度条的垂直重叠(进度条下边缘约y=0.524，血量在这之下)。
 const heartsMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.3545, 0.1182),
   new THREE.MeshBasicMaterial({ map: heartsTexture, transparent: true, depthTest: false })
 );
-heartsMesh.position.set(-0.780, 0.686, -1.3);
+heartsMesh.position.set(-0.45, 0.45, -1.3);
 heartsMesh.renderOrder = 999;
 camera.add(heartsMesh);
 
@@ -1206,6 +1246,87 @@ const COMBO_QUALIFY_SCORE = 6;
 let comboStreak = 0;
 let comboMultiplier = 1.0;
 let levelScore = 0;
+
+// ---------- 连击专属反馈：达到里程碑节点时的额外视觉/听觉冲击 ----------
+// 2026-07-11第十一轮新增：原来连击只体现在数值(倍率×分数)和进度条上的
+// 小字"连击x2.0"，反馈强度跟单次命中的GOOD/GREAT/EXCELLENT差不多，玩家
+// 感受不到"越连越爽"的递进感。这里加一层专属反馈，只在连击数达到里程碑
+// (第3次、第5次，之后每5次)时触发一次，比常规评级文字更大、更亮、停留
+// 更久，配合音调随连击数递增的音效，做出"这次不一样"的强烈瞬间反馈。
+// 位置特意选在视野中央偏上(而不是命中点)——命中点已经有常规评级文字，
+// 这个是独立的"全局庆祝"效果，短暂(1秒)划过视野中央，不会长时间挡住
+// 瞄准视线。
+const COMBO_BURST_LIFETIME = 1000; // ms，比常规评级文字(1500ms)更短但视觉冲击更强，快速过场不影响下一次瞄准
+const comboBurstCanvas = document.createElement('canvas');
+comboBurstCanvas.width = 640;
+comboBurstCanvas.height = 200;
+const comboBurstCtx = comboBurstCanvas.getContext('2d');
+const comboBurstTexture = new THREE.CanvasTexture(comboBurstCanvas);
+const comboBurstMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.85, 0.266),
+  new THREE.MeshBasicMaterial({ map: comboBurstTexture, transparent: true, depthTest: false })
+);
+comboBurstMesh.position.set(0, 0.12, -1.3); // camera子物体，视野中央偏上，跟其它HUD同一批第十轮统一的1.3米距离
+comboBurstMesh.renderOrder = 1500; // 比普通评级文字(1000)更高，确保叠加时盖在最上面
+comboBurstMesh.visible = false;
+camera.add(comboBurstMesh);
+
+let comboBurstStartTime = 0;
+
+function drawComboBurst(streak) {
+  const ctx = comboBurstCtx;
+  ctx.clearRect(0, 0, comboBurstCanvas.width, comboBurstCanvas.height);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 84px sans-serif';
+  ctx.lineWidth = 10;
+  ctx.strokeStyle = '#7a3d00';
+  ctx.strokeText(`连击 x${streak}!`, 320, 100);
+  ctx.fillStyle = '#ffd23f';
+  ctx.fillText(`连击 x${streak}!`, 320, 100);
+  comboBurstTexture.needsUpdate = true;
+}
+
+// 音调随连击数递增而升高(封顶避免无限升高刺耳)，叠加一个五度音做出更
+// 丰富的"连击"音色，每5连击额外加一层欢呼感白噪声，制造"越连越爽"的
+// 听觉递进感——复用已有的playTone/playNoiseBurst，不引入新的合成逻辑
+function playComboBurstSound(streak) {
+  const step = Math.min(streak, 20);
+  const freq = 500 + step * 40;
+  playTone({ freq, duration: 0.14, type: 'triangle', gain: 0.3 });
+  playTone({ freq: freq * 1.5, duration: 0.16, type: 'triangle', gain: 0.22 });
+  if (streak % 5 === 0) playNoiseBurst(0.25, 0.14);
+}
+
+function triggerComboBurst(streak) {
+  drawComboBurst(streak);
+  comboBurstMesh.visible = true;
+  comboBurstStartTime = performance.now();
+  playComboBurstSound(streak);
+}
+
+function updateComboBurst(now) {
+  if (!comboBurstMesh.visible) return;
+  const age = now - comboBurstStartTime;
+  if (age > COMBO_BURST_LIFETIME) {
+    comboBurstMesh.visible = false;
+    return;
+  }
+  let scale, opacity;
+  if (age < 200) {
+    const t = age / 200;
+    scale = 0.4 + t * 0.9 + Math.sin(t * Math.PI) * 0.3; // 弹出时的overshoot缩放，比常规评级文字更夸张
+    opacity = t;
+  } else if (age < 700) {
+    scale = 1.2;
+    opacity = 1;
+  } else {
+    scale = 1.2;
+    opacity = Math.max(0, 1 - (age - 700) / (COMBO_BURST_LIFETIME - 700));
+  }
+  comboBurstMesh.scale.set(scale, scale, 1);
+  comboBurstMesh.material.opacity = opacity;
+}
 
 const progressCanvas = document.createElement('canvas');
 progressCanvas.width = 512;
@@ -1404,6 +1525,11 @@ function applyScoreAndCombo(rawScore) {
     comboStreak = 0;
   }
   comboMultiplier = comboStreak === 0 ? 1.0 : COMBO_TABLE[Math.min(comboStreak - 1, COMBO_TABLE.length - 1)];
+
+  // 连击里程碑：第3次、第5次，之后每5次(10/15/20...)触发一次专属反馈
+  if (comboStreak === 3 || (comboStreak >= 5 && comboStreak % 5 === 0)) {
+    triggerComboBurst(comboStreak);
+  }
 
   const finalScore = Math.round(rawScore * comboMultiplier);
   levelScore += finalScore;
@@ -1677,17 +1803,18 @@ function updateEnemy(dt) {
 //
 // 2026-07-11第九轮：再升级成{x,y,z}三元组，同时插值x/y/z三个分量，路径
 // 终于用上了VR的深度维度，不再是纯平面的Z字形。z的变化范围经过刻意控制
-// （每个关卡config.waypoints里各点的z都收在TARGET_POS.z附近一个小区间内，
-// 具体数值见LEVEL_ENEMY_CONFIGS和README的参数表），原因：
-// tryHitEnemy()判定命中、dangerDistance判定扣命，都只比较x/y，从来没用过
-// z——这意味着改变z不会影响任何命中/受伤逻辑的正确性，但会影响"视觉上
-// 命中的时机"：番茄穿过靶所在的固定平面(z=TARGET_POS.z)那一刻才算命中，
-// 如果敌人此时的z跟这个平面差太多，命中特效(溅落/标记点，固定生成在
-// TARGET_POS.z这个平面上)跟敌人实际所在深度就会看起来对不上——敌人离
-// 这个平面越近，这个视觉误差越小。所以z只允许往"离靶更近、离玩家更近"
-// 的方向偏(z越小越接近玩家)，绝不允许比TARGET_POS.z更远(那会让敌人视觉
-// 上卡进背板backboard所在的平面)，且偏移幅度控制得比较保守，具体推导见
-// README"三维路径参数设计"一节。
+// （每个关卡config.waypoints里各点的z都收在TARGET_POS.z附近一个区间内，
+// 具体数值见LEVEL_ENEMY_CONFIGS和README的参数表）。
+// 2026-07-11第十一轮更新：这段注释原本写的是"tryHitEnemy()判定命中只比较
+// x/y，从来没用过z，所以z只能往离玩家更近的方向偏、且偏移要保守，否则
+// 命中特效跟敌人实际深度会视觉上对不上"——这个理由**已经不成立**了。
+// 命中判定这一轮改成了checkMovingEnemySphereHit()的3D球体检测(逐帧比较
+// 投掷物飞行线段到敌人当前3D位置的最短距离，见该函数的说明)，x/y/z三个
+// 分量现在都会被用上，"z变化导致命中时机跟敌人深度对不上"这个问题已经
+// 随之解决——命中点现在就是投掷物飞行线段上离敌人最近的那一点，天然跟
+// 敌人的实际3D位置一致，不再依赖固定的靶平面。z的允许范围目前仍然保留
+// 着"不超过TARGET_POS.z"这条边界（避免敌人视觉上卡进背板backboard），
+// 但这只是美术/穿模考虑，不再是命中判定正确性的约束。
 function updateWaypointMovement(dt, speed) {
   const wp = enemyConfig.waypoints;
   const target = wp[enemyWaypointIndex];
@@ -1730,22 +1857,50 @@ function onEnemyReachedProtected() {
   triggerProtectedFlinch();
 }
 
-// 供resolveThrow()调用（阶段4接入）：投掷物命中靶平面的位置离敌人当前
-// 位置够近就算命中，命中后敌人消失+延迟重生。返回是否命中，方便调用方
-// 决定要不要触发对应的视觉/音效反馈。
-function tryHitEnemy(hitX, hitY) {
-  if (!enemyGroup || !enemyAlive) return false;
-  const dx = hitX - enemyGroup.position.x;
-  const dy = hitY - enemyGroup.position.y;
-  const dist = Math.hypot(dx, dy);
+// 2026-07-11第十一轮：原来的tryHitEnemy(hitX,hitY)是2D距离检测——只在投掷物
+// 穿过固定的靶平面(z=TARGET_POS.z)那一刻，比较落点跟敌人position.x/y的
+// 距离，完全没看z。这套逻辑是从"敌人固定巡逻在跟靶同一个z深度"这个前提
+// 继承来的，多轮加入z(深度)分量之后，敌人的实际z不再等于TARGET_POS.z，
+// 前提已经不成立——真机反馈"看起来穿过了狐狸/老鼠的身体却没算命中"，
+// 根因就是这个：投掷物飞行轨迹在敌人所在的实际深度真的经过了它，但
+// 判定只在靶平面那个不同的深度上算距离，两者对不上。
+//
+// 改成真正的3D球体碰撞：每一帧(不再等到穿越靶平面那一刻)比较投掷物这
+// 一帧走过的线段(prevPos→newPos，updateFlying()里逐帧积分本来就有这两个
+// 点)到敌人当前3D位置的最短距离，小于hitRadius就判定命中，命中点用
+// "线段上离敌人最近的那一点"(而不是靶平面上的点——敌人可能根本不在
+// 那个深度附近)。这是逐帧离散检测，不是连续碰撞检测(CCD)，但复用的是
+// 已经在算的prevDartPos/newDartPos，没有引入新的物理模型；只要投掷物
+// 单帧移动距离不会远超hitRadius(狐狸0.48m/老鼠默认0.18m这个量级下，
+// 现在的抛物线速度不会走到这么极端)，这个近似足够可靠。
+//
+// 这段逻辑只在updateFlying()里被`currentLevel !== 0`的分支调用，第一关
+// 固定靶面的判定(受保护的crossedPlane代码块)完全没有被改动，也从来不会
+// 走到这个函数。
+function closestPointOnSegment(point, a, b) {
+  const ab = new THREE.Vector3().subVectors(b, a);
+  const abLenSq = ab.lengthSq();
+  if (abLenSq < 1e-9) return a.clone();
+  const t = THREE.MathUtils.clamp(new THREE.Vector3().subVectors(point, a).dot(ab) / abLenSq, 0, 1);
+  return a.clone().addScaledVector(ab, t);
+}
+
+// 每帧调用：检测投掷物这一帧的飞行线段是否跟敌人当前的3D球体相交。
+// 命中时直接在这里完成敌人状态变更(消失+延迟重生)，返回命中点坐标；
+// 调用方(updateFlying)拿到非null返回值后应该直接resolveThrow并return，
+// 不再走后面(受保护的)靶平面穿越检测。
+function checkMovingEnemySphereHit(prevPos, newPos) {
+  if (!enemyGroup || !enemyAlive) return null;
   const hitRadius = (enemyConfig && enemyConfig.hitRadius) || ENEMY_HIT_RADIUS;
+  const closest = closestPointOnSegment(enemyGroup.position, prevPos, newPos);
+  const dist = closest.distanceTo(enemyGroup.position);
   if (dist < hitRadius) {
     enemyAlive = false;
     enemyGroup.visible = false;
     enemyRespawnTimer = ENEMY_RESPAWN_DELAY;
-    return true;
+    return { x: closest.x, y: closest.y, dist };
   }
-  return false;
+  return null;
 }
 
 // 被保护对象的受惊反应：短促的上下弹动，不是精确的物理模拟，纯粹是
@@ -2578,20 +2733,28 @@ function updateTargetShake(dt) {
 // ---------- 命中判定：飞镖飞行过程中，每帧检测是否穿过靶所在的平面 ----------
 // hitPoint为{x,y,dist}表示这一次确实穿过了靶平面（不管有没有落在环内），
 // 为null表示是"落地/超时"兜底判的脱靶，没有真实穿越点可标记。
-function resolveThrow(scoreValue, hitPoint) {
-  console.log('[throw] resolveThrow被调用, scoreValue =', scoreValue, ', hitPoint =', hitPoint, ', itemType =', currentItemType, ', level =', currentLevel);
+// 2026-07-11第十一轮：新增第三个参数forcedEnemyHit——第二/三关的移动目标物
+// 现在用checkMovingEnemySphereHit()逐帧做3D球体检测(见该函数上方的说明)，
+// 命中判定和敌人状态变更(消失/重生)都已经在那个函数里完成了，这里不需要
+// 也不应该再重新用旧的2D距离逻辑判一次；调用方(updateFlying)检测到命中
+// 时会传forcedEnemyHit=true，直接告诉这里"这就是一次确认过的命中"。如果
+// 走到这个函数时forcedEnemyHit是false(默认值)，说明是受保护的靶平面
+// 穿越检测那条路径触发的调用——对第一关来说这仍然是原来的环数计分；
+// 对第二/三关来说，由于命中已经在3D球体检测那一关就会被拦截掉(见
+// updateFlying里的调用顺序)，能走到这里说明必然是脱靶，不需要再检测。
+function resolveThrow(scoreValue, hitPoint, forcedEnemyHit = false) {
+  console.log('[throw] resolveThrow被调用, scoreValue =', scoreValue, ', hitPoint =', hitPoint, ', itemType =', currentItemType, ', level =', currentLevel, ', forcedEnemyHit =', forcedEnemyHit);
   throwCount += 1;
   lastHitDistance = hitPoint ? hitPoint.dist : null;
 
   // 第一关(靶场)：跟之前完全一样，scoreValue就是scoreForDistance()算出来的
   // 环数分，直接当"这一杆的原始分"用。
   //
-  // 第二/三关(敌人关卡)：这里的hitPoint仍然是受保护的碰撞检测代码块算出来
-  // 的、飞行物穿过z=TARGET_POS.z平面时的精确坐标——没有另起一套碰撞系统，
-  // 敌人只是巡逻在跟靶同一个z深度上，所以能直接复用这个坐标去跟敌人当前
-  // 位置比距离(tryHitEnemy)。传入的scoreValue(环数分)在这两关没有意义，
-  // 忽略掉，命中与否改由tryHitEnemy的返回值决定，命中给ENEMY_HIT_SCORE
-  // 这个固定分值。
+  // 第二/三关(敌人关卡)：命中判定已经不再依赖"投掷物穿过靶平面的2D落点"
+  // 了(那套逻辑是给z固定不变的敌人设计的，敌人加入z轴巡逻之后已经不
+  // 适用，见checkMovingEnemySphereHit的说明)。现在命中与否直接读
+  // forcedEnemyHit这个由调用方预先算好的结果，命中给ENEMY_HIT_SCORE
+  // 这个固定分值，传入的scoreValue参数在这两关没有意义，忽略掉。
   let effectiveScore;
   let hitSomething;
   let enemyHit = false; // 只有第二/三关会用到，第一关始终保持false
@@ -2606,7 +2769,7 @@ function resolveThrow(scoreValue, hitPoint) {
       spawnRatingText(hitPoint.x, hitPoint.y, scoreValue);
     }
   } else {
-    enemyHit = hitPoint ? tryHitEnemy(hitPoint.x, hitPoint.y) : false;
+    enemyHit = forcedEnemyHit;
     effectiveScore = enemyHit ? ENEMY_HIT_SCORE : 0;
     hitSomething = enemyHit;
     lastScore = effectiveScore;
@@ -2686,6 +2849,20 @@ function updateFlying(dt) {
   }
 
   flightTime += dt;
+
+  // 2026-07-11第十一轮新增：第二/三关的移动目标物用3D球体检测，每帧都测，
+  // 不等到穿越固定靶平面那一刻——这一段只在currentLevel!==0时生效，加在
+  // 下面受保护的靶平面穿越检测(crossedPlane)之前，命中就直接resolveThrow
+  // +return，不会执行到下面那一段；如果没命中(包括第一关，或者第二/三关
+  // 但没打中)，会正常往下走到原来完全没有改动过的crossedPlane检测。
+  // 第一关(currentLevel===0)不会进入这个分支，跟以前完全一样。
+  if (currentLevel !== 0) {
+    const enemyHitPoint = checkMovingEnemySphereHit(prevDartPos, newDartPos);
+    if (enemyHitPoint) {
+      resolveThrow(ENEMY_HIT_SCORE, enemyHitPoint, true);
+      return;
+    }
+  }
 
   // ---- 判断这一帧是否穿过靶平面（TARGET_POS.z），用线性插值找穿越瞬间的精确落点 ----
   const crossedPlane =
@@ -2773,6 +2950,7 @@ function animate() {
 
   updateHitMarkers(now);
   updateRatingTexts(now);
+  updateComboBurst(now);
   updateSparks(dt); // 不管在不在飞行，已经存在的火星粒子都要继续衰减/淡出
   updateSplatEffects(dt);
   updateAxeImpacts(now);

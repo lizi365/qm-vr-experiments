@@ -49,9 +49,20 @@ export function createXRExitButton(renderer, camera, scene, controllers, options
   const ctx = canvas.getContext('2d');
   const texture = new THREE.CanvasTexture(canvas);
 
-  // 纯展示用的说明牌：不再有hover状态，只画一次。图示化的按键图标
-  // (一个圆圈+字母)+文字说明，玩家看一眼就知道按哪个键，不需要瞄准。
-  function draw() {
+  // 纯展示用的说明牌：不再有hover状态，只画一次(distanceLabel变化时才重画)。
+  // 图示化的按键图标(一个圆圈+字母)+文字说明，玩家看一眼就知道按哪个键，
+  // 不需要瞄准。
+  // 2026-07-11第十一轮：连续两轮反馈"血量/退出牌贴脸"，但代码/部署/渲染
+  // 侧反复核实过都指向"距离摄像机1.3~1.7米，不是贴脸"（见demo-dart
+  // README"真机反馈第十一轮"一节的排查记录），排除了部署/缓存问题
+  // (用户确认每次都手动访问主域名，不是历史部署的哈希URL)。为了下一次
+  // 真机测试能拿到一个明确的数字而不是主观印象，这里在牌子上加一行实时
+  // 计算的"实测距离"文字——如果真机上看到的数字确实是1.6m左右但视觉上
+  // 仍然觉得贴脸，说明问题不在距离数值本身(可能是头显FOV/镜片畸变/
+  // 立体渲染这类应用代码管不到的层面)；如果真机上这个数字明显小于1.3米，
+  // 说明WebXR会话里摄像机的姿态/矩阵更新有application没预料到的问题，
+  // 两种情况需要的后续排查方向完全不同，这行数字能直接把两者区分开。
+  function draw(distanceLabel) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = 'rgba(10, 14, 22, 0.75)';
     ctx.strokeStyle = '#3a4a60';
@@ -62,7 +73,7 @@ export function createXRExitButton(renderer, camera, scene, controllers, options
     ctx.stroke();
 
     // 按键图标：一个圆圈，里面写字母，示意"这是一个物理按键"
-    const iconCx = 62, iconCy = 80, iconR = 34;
+    const iconCx = 62, iconCy = 72, iconR = 34;
     ctx.beginPath();
     ctx.arc(iconCx, iconCy, iconR, 0, Math.PI * 2);
     ctx.fillStyle = '#3a4a60';
@@ -79,14 +90,40 @@ export function createXRExitButton(renderer, camera, scene, controllers, options
     ctx.textAlign = 'left';
     ctx.fillStyle = '#cfe8ff';
     ctx.font = 'bold 34px sans-serif';
-    ctx.fillText('退出 VR', 116, 68);
+    ctx.fillText('退出 VR', 116, 60);
     ctx.font = '22px sans-serif';
     ctx.fillStyle = '#7f96ac';
-    ctx.fillText('按手柄 B/Y 键', 116, 106);
+    ctx.fillText('按手柄 B/Y 键', 116, 98);
+
+    if (distanceLabel) {
+      ctx.font = '18px sans-serif';
+      ctx.fillStyle = '#6a8aa8';
+      ctx.fillText('实测距离(调试用): ' + distanceLabel, 116, 130);
+    }
 
     texture.needsUpdate = true;
   }
   draw();
+
+  // 每隔一小段时间重新计算一次面板到摄像机的实际世界坐标距离，数值变化
+  // 才重画canvas(避免每帧都redraw)——这个readout是给下一轮真机测试用的
+  // 诊断工具，不是游戏功能的一部分。
+  let lastDistanceLabel = null;
+  let distanceCheckTimer = 0;
+  const _camPos = new THREE.Vector3();
+  const _panelPos = new THREE.Vector3();
+  function updateDistanceReadout(dt) {
+    distanceCheckTimer -= dt;
+    if (distanceCheckTimer > 0) return;
+    distanceCheckTimer = 0.5; // 每0.5秒检查一次，不需要逐帧更新
+    camera.getWorldPosition(_camPos);
+    panel.getWorldPosition(_panelPos);
+    const label = _camPos.distanceTo(_panelPos).toFixed(2) + 'm';
+    if (label !== lastDistanceLabel) {
+      lastDistanceLabel = label;
+      draw(label);
+    }
+  }
 
   const panel = new THREE.Mesh(
     new THREE.PlaneGeometry(WIDTH, HEIGHT),
@@ -105,7 +142,13 @@ export function createXRExitButton(renderer, camera, scene, controllers, options
     controller.addEventListener('disconnected', () => { inputSources[idx] = null; });
   });
 
+  let lastUpdateTime = performance.now();
   function update() {
+    const now = performance.now();
+    const dt = Math.min((now - lastUpdateTime) / 1000, 0.5);
+    lastUpdateTime = now;
+    updateDistanceReadout(dt);
+
     for (let i = 0; i < inputSources.length; i++) {
       const src = inputSources[i];
       const gp = src && src.gamepad;
